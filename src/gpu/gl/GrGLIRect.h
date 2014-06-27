@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
@@ -12,6 +11,7 @@
 #define GrGLIRect_DEFINED
 
 #include "gl/GrGLInterface.h"
+#include "GrGLUtil.h"
 
 /**
  * Helper struct for dealing with the fact that Ganesh and GL use different
@@ -36,23 +36,28 @@ struct GrGLIRect {
         GR_GL_GetIntegerv(gl, GR_GL_VIEWPORT, (GrGLint*) this);
     }
 
-    // sometimes we have a GrIRect from the client that we
+    // sometimes we have a SkIRect from the client that we
     // want to simultaneously make relative to GL's viewport
-    // and convert from top-down to bottom-up.
+    // and (optionally) convert from top-down to bottom-up.
     void setRelativeTo(const GrGLIRect& glRect,
                        int leftOffset,
                        int topOffset,
                        int width,
-                       int height) {
+                       int height,
+                       GrSurfaceOrigin origin) {
         fLeft = glRect.fLeft + leftOffset;
         fWidth = width;
-        fBottom = glRect.fBottom + (glRect.fHeight - topOffset - height);
+        if (kBottomLeft_GrSurfaceOrigin == origin) {
+            fBottom = glRect.fBottom + (glRect.fHeight - topOffset - height);
+        } else {
+            fBottom = glRect.fBottom + topOffset;
+        }
         fHeight = height;
 
-        GrAssert(fLeft >= 0);
-        GrAssert(fWidth >= 0);
-        GrAssert(fBottom >= 0);
-        GrAssert(fHeight >= 0);
+        SkASSERT(fLeft >= 0);
+        SkASSERT(fWidth >= 0);
+        SkASSERT(fBottom >= 0);
+        SkASSERT(fHeight >= 0);
     }
 
     bool contains(const GrGLIRect& glRect) const {

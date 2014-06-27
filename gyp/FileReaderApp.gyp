@@ -1,13 +1,10 @@
 {
-  'includes': [
-    'common.gypi',
-  ],
   'targets': [
     {
       'target_name': 'FileReaderApp',
       'type': 'executable',
       'mac_bundle' : 1,
-      
+
       'include_dirs' : [
         '../include/pipe',
         '../experimental/FileReaderApp',
@@ -21,11 +18,7 @@
         '../src/utils/mac/SkOSWindow_Mac.cpp',
       ],
       'dependencies': [
-        'core.gyp:core',
-        'effects.gyp:effects',
-        'opts.gyp:opts',
-        'ports.gyp:ports',
-        'utils.gyp:utils',
+        'skia_lib.gyp:skia_lib',
         'views.gyp:views',
         'xml.gyp:xml',
       ],
@@ -70,9 +63,3 @@
     },
   ],
 }
-
-# Local Variables:
-# tab-width:2
-# indent-tabs-mode:nil
-# End:
-# vim: set expandtab tabstop=2 shiftwidth=2:

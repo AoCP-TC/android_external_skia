@@ -1,14 +1,15 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
+
 #include "Test.h"
+#include "TestClassDef.h"
 #include "SkString.h"
 #include <stdarg.h>
-
+#include <stdio.h>
 
 // Windows vsnprintf doesn't 0-terminate safely), but is so far
 // encapsulated in SkString that we can't test it directly.
@@ -28,13 +29,11 @@
         va_end(args);                               \
     } while (0)
 
-void printfAnalog(char* buffer, int size, const char format[], ...) {
+static void printfAnalog(char* buffer, int size, const char format[], ...) {
     ARGS_TO_BUFFER(format, buffer, size);
 }
 
-
-
-static void TestString(skiatest::Reporter* reporter) {
+DEF_TEST(String, reporter) {
     SkString    a;
     SkString    b((size_t)0);
     SkString    c("");
@@ -55,6 +54,25 @@ static void TestString(skiatest::Reporter* reporter) {
     REPORTER_ASSERT(reporter, a.equals("hello", 5));
     REPORTER_ASSERT(reporter, a.equals("hello"));
     REPORTER_ASSERT(reporter, !a.equals("help"));
+
+    REPORTER_ASSERT(reporter,  a.startsWith("hell"));
+    REPORTER_ASSERT(reporter,  a.startsWith('h'));
+    REPORTER_ASSERT(reporter, !a.startsWith( "ell"));
+    REPORTER_ASSERT(reporter, !a.startsWith( 'e'));
+    REPORTER_ASSERT(reporter,  a.startsWith(""));
+    REPORTER_ASSERT(reporter,  a.endsWith("llo"));
+    REPORTER_ASSERT(reporter,  a.endsWith('o'));
+    REPORTER_ASSERT(reporter, !a.endsWith("ll" ));
+    REPORTER_ASSERT(reporter, !a.endsWith('l'));
+    REPORTER_ASSERT(reporter,  a.endsWith(""));
+    REPORTER_ASSERT(reporter,  a.contains("he"));
+    REPORTER_ASSERT(reporter,  a.contains("ll"));
+    REPORTER_ASSERT(reporter,  a.contains("lo"));
+    REPORTER_ASSERT(reporter,  a.contains("hello"));
+    REPORTER_ASSERT(reporter, !a.contains("hellohello"));
+    REPORTER_ASSERT(reporter,  a.contains(""));
+    REPORTER_ASSERT(reporter,  a.contains('e'));
+    REPORTER_ASSERT(reporter, !a.contains('z'));
 
     SkString    e(a);
     SkString    f("hello");
@@ -83,20 +101,53 @@ static void TestString(skiatest::Reporter* reporter) {
     a.set("abcd");
 
     a.set("");
-    a.appendS64(72036854775808LL, 0);
-    REPORTER_ASSERT(reporter, a.equals("72036854775808"));
+    a.appendS32(0x7FFFFFFFL);
+    REPORTER_ASSERT(reporter, a.equals("2147483647"));
+    a.set("");
+    a.appendS32(0x80000001L);
+    REPORTER_ASSERT(reporter, a.equals("-2147483647"));
+    a.set("");
+    a.appendS32(0x80000000L);
+    REPORTER_ASSERT(reporter, a.equals("-2147483648"));
 
     a.set("");
-    a.appendS64(-1844674407370LL, 0);
-    REPORTER_ASSERT(reporter, a.equals("-1844674407370"));
+    a.appendU32(0x7FFFFFFFUL);
+    REPORTER_ASSERT(reporter, a.equals("2147483647"));
+    a.set("");
+    a.appendU32(0x80000001UL);
+    REPORTER_ASSERT(reporter, a.equals("2147483649"));
+    a.set("");
+    a.appendU32(0xFFFFFFFFUL);
+    REPORTER_ASSERT(reporter, a.equals("4294967295"));
 
     a.set("");
-    a.appendS64(73709551616LL, 15);
-    REPORTER_ASSERT(reporter, a.equals("000073709551616"));
+    a.appendS64(0x7FFFFFFFFFFFFFFFLL, 0);
+    REPORTER_ASSERT(reporter, a.equals("9223372036854775807"));
+    a.set("");
+    a.appendS64(0x8000000000000001LL, 0);
+    REPORTER_ASSERT(reporter, a.equals("-9223372036854775807"));
+    a.set("");
+    a.appendS64(0x8000000000000000LL, 0);
+    REPORTER_ASSERT(reporter, a.equals("-9223372036854775808"));
+    a.set("");
+    a.appendS64(0x0000000001000000LL, 15);
+    REPORTER_ASSERT(reporter, a.equals("000000016777216"));
+    a.set("");
+    a.appendS64(0xFFFFFFFFFF000000LL, 15);
+    REPORTER_ASSERT(reporter, a.equals("-000000016777216"));
 
     a.set("");
-    a.appendS64(-429496729612LL, 15);
-    REPORTER_ASSERT(reporter, a.equals("-000429496729612"));
+    a.appendU64(0x7FFFFFFFFFFFFFFFULL, 0);
+    REPORTER_ASSERT(reporter, a.equals("9223372036854775807"));
+    a.set("");
+    a.appendU64(0x8000000000000001ULL, 0);
+    REPORTER_ASSERT(reporter, a.equals("9223372036854775809"));
+    a.set("");
+    a.appendU64(0xFFFFFFFFFFFFFFFFULL, 0);
+    REPORTER_ASSERT(reporter, a.equals("18446744073709551615"));
+    a.set("");
+    a.appendU64(0x0000000001000000ULL, 15);
+    REPORTER_ASSERT(reporter, a.equals("000000016777216"));
 
     static const struct {
         SkScalar    fValue;
@@ -135,8 +186,18 @@ static void TestString(skiatest::Reporter* reporter) {
     REPORTER_ASSERT(reporter, buffer[18] == ' ');
     REPORTER_ASSERT(reporter, buffer[19] == 0);
     REPORTER_ASSERT(reporter, buffer[20] == 'a');
-    
+
 }
 
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("String", StringTestClass, TestString)
+DEF_TEST(String_SkStrSplit, r) {
+    SkTArray<SkString> results;
+
+    SkStrSplit("a-_b_c-dee--f-_-_-g-", "-_", &results);
+    REPORTER_ASSERT(r, results.count() == 6);
+    REPORTER_ASSERT(r, results[0].equals("a"));
+    REPORTER_ASSERT(r, results[1].equals("b"));
+    REPORTER_ASSERT(r, results[2].equals("c"));
+    REPORTER_ASSERT(r, results[3].equals("dee"));
+    REPORTER_ASSERT(r, results[4].equals("f"));
+    REPORTER_ASSERT(r, results[5].equals("g"));
+}

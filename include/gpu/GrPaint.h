@@ -10,115 +10,124 @@
 #ifndef GrPaint_DEFINED
 #define GrPaint_DEFINED
 
-#include "GrTexture.h"
 #include "GrColor.h"
-#include "GrSamplerState.h"
+#include "GrEffectStage.h"
 
 #include "SkXfermode.h"
 
 /**
- * The paint describes how pixels are colored when the context draws to
- * them. TODO: Make this a "real" class with getters and setters, default
- * values, and documentation.
+ * The paint describes how color and coverage are computed at each pixel by GrContext draw
+ * functions and the how color is blended with the destination pixel.
+ *
+ * The paint allows installation of custom color and coverage stages. New types of stages are
+ * created by subclassing GrEffect.
+ *
+ * The primitive color computation starts with the color specified by setColor(). This color is the
+ * input to the first color stage. Each color stage feeds its output to the next color stage. The
+ * final color stage's output color is input to the color filter specified by
+ * setXfermodeColorFilter which produces the final source color, S.
+ *
+ * Fractional pixel coverage follows a similar flow. The coverage is initially the value specified
+ * by setCoverage(). This is input to the first coverage stage. Coverage stages are chained
+ * together in the same manner as color stages. The output of the last stage is modulated by any
+ * fractional coverage produced by anti-aliasing. This last step produces the final coverage, C.
+ *
+ * setBlendFunc() specifies blending coefficients for S (described above) and D, the initial value
+ * of the destination pixel, labeled Bs and Bd respectively. The final value of the destination
+ * pixel is then D' = (1-C)*D + C*(Bd*D + Bs*S).
+ *
+ * Note that the coverage is applied after the blend. This is why they are computed as distinct
+ * values.
+ *
+ * TODO: Encapsulate setXfermodeColorFilter in a GrEffect and remove from GrPaint.
  */
 class GrPaint {
 public:
-    enum {
-        kMaxTextures = 1,
-        kMaxMasks    = 1,
-    };
+    GrPaint() { this->reset(); }
 
-    // All the paint fields are public except textures/samplers
-    GrBlendCoeff                fSrcBlendCoeff;
-    GrBlendCoeff                fDstBlendCoeff;
-    bool                        fAntiAlias;
-    bool                        fDither;
-    bool                        fColorMatrixEnabled;
+    GrPaint(const GrPaint& paint) { *this = paint; }
 
-    GrColor                     fColor;
-    uint8_t                     fCoverage;
+    ~GrPaint() {}
 
-    GrColor                     fColorFilterColor;
-    SkXfermode::Mode            fColorFilterXfermode;
-    float                       fColorMatrix[20];
-
-    void setTexture(int i, GrTexture* texture) {
-        GrAssert((unsigned)i < kMaxTextures);
-        GrSafeRef(texture);
-        GrSafeUnref(fTextures[i]);
-        fTextures[i] = texture;
+    /**
+     * Sets the blending coefficients to use to blend the final primitive color with the
+     * destination color. Defaults to kOne for src and kZero for dst (i.e. src mode).
+     */
+    void setBlendFunc(GrBlendCoeff srcCoeff, GrBlendCoeff dstCoeff) {
+        fSrcBlendCoeff = srcCoeff;
+        fDstBlendCoeff = dstCoeff;
     }
+    GrBlendCoeff getSrcBlendCoeff() const { return fSrcBlendCoeff; }
+    GrBlendCoeff getDstBlendCoeff() const { return fDstBlendCoeff; }
 
-    GrTexture* getTexture(int i) const { 
-        GrAssert((unsigned)i < kMaxTextures);
-        return fTextures[i]; 
-    }
+    /**
+     * The initial color of the drawn primitive. Defaults to solid white.
+     */
+    void setColor(GrColor color) { fColor = color; }
+    GrColor getColor() const { return fColor; }
 
-    GrSamplerState* textureSampler(int i) {
-        GrAssert((unsigned)i < kMaxTextures);
-        return fTextureSamplers + i;
-    }
+    /**
+     * Applies fractional coverage to the entire drawn primitive. Defaults to 0xff.
+     */
+    void setCoverage(uint8_t coverage) { fCoverage = coverage; }
+    uint8_t getCoverage() const { return fCoverage; }
 
-    const GrSamplerState& getTextureSampler(int i) const {
-        GrAssert((unsigned)i < kMaxTextures);
-        return fTextureSamplers[i];
-    }
+    /**
+     * Should primitives be anti-aliased or not. Defaults to false.
+     */
+    void setAntiAlias(bool aa) { fAntiAlias = aa; }
+    bool isAntiAlias() const { return fAntiAlias; }
 
-    // The mask can be alpha-only or per channel. It is applied
-    // after the colorfilter
-    void setMask(int i, GrTexture* mask) {
-        GrAssert((unsigned)i < kMaxMasks);
-        GrSafeRef(mask);
-        GrSafeUnref(fMaskTextures[i]);
-        fMaskTextures[i] = mask;
-    }
+    /**
+     * Should dithering be applied. Defaults to false.
+     */
+    void setDither(bool dither) { fDither = dither; }
+    bool isDither() const { return fDither; }
 
-    GrTexture* getMask(int i) const { 
-        GrAssert((unsigned)i < kMaxMasks);
-        return fMaskTextures[i]; 
-    }
-
-    // mask's sampler matrix is always applied to the positions
-    // (i.e. no explicit texture coordinates)
-    GrSamplerState* maskSampler(int i) {
-        GrAssert((unsigned)i < kMaxMasks);
-        return fMaskSamplers + i;
-    }
-
-    const GrSamplerState& getMaskSampler(int i) const {
-        GrAssert((unsigned)i < kMaxMasks);
-        return fMaskSamplers[i];
-    }
-
-    // pre-concats sampler matrices for non-NULL textures and masks
-    void preConcatActiveSamplerMatrices(const GrMatrix& matrix) {
-        for (int i = 0; i < kMaxTextures; ++i) {
-            fTextureSamplers[i].preConcatMatrix(matrix);
+    /**
+     * Appends an additional color effect to the color computation.
+     */
+    const GrEffectRef* addColorEffect(const GrEffectRef* effect, int attr0 = -1, int attr1 = -1) {
+        SkASSERT(NULL != effect);
+        if (!(*effect)->willUseInputColor()) {
+            fColorStages.reset();
         }
-        for (int i = 0; i < kMaxMasks; ++i) {
-            fMaskSamplers[i].preConcatMatrix(matrix);
-        }
+        SkNEW_APPEND_TO_TARRAY(&fColorStages, GrEffectStage, (effect, attr0, attr1));
+        return effect;
     }
 
-    // uninitialized
-    GrPaint() {
-        for (int i = 0; i < kMaxTextures; ++i) {
-            fTextures[i] = NULL;
+    /**
+     * Appends an additional coverage effect to the coverage computation.
+     */
+    const GrEffectRef* addCoverageEffect(const GrEffectRef* effect, int attr0 = -1, int attr1 = -1) {
+        SkASSERT(NULL != effect);
+        if (!(*effect)->willUseInputColor()) {
+            fCoverageStages.reset();
         }
-        for (int i = 0; i < kMaxMasks; ++i) {
-            fMaskTextures[i] = NULL;
-        }
+        SkNEW_APPEND_TO_TARRAY(&fCoverageStages, GrEffectStage, (effect, attr0, attr1));
+        return effect;
     }
 
-    GrPaint(const GrPaint& paint) {
-        for (int i = 0; i < kMaxTextures; ++i) {
-            fTextures[i] = NULL;
-        }
-        for (int i = 0; i < kMaxMasks; ++i) {
-            fMaskTextures[i] = NULL;
-        }
-        *this = paint;
-    }
+    /**
+     * Helpers for adding color or coverage effects that sample a texture. The matrix is applied
+     * to the src space position to compute texture coordinates.
+     */
+    void addColorTextureEffect(GrTexture* texture, const SkMatrix& matrix);
+    void addCoverageTextureEffect(GrTexture* texture, const SkMatrix& matrix);
+
+    void addColorTextureEffect(GrTexture* texture,
+                               const SkMatrix& matrix,
+                               const GrTextureParams& params);
+    void addCoverageTextureEffect(GrTexture* texture,
+                                  const SkMatrix& matrix,
+                                  const GrTextureParams& params);
+
+    int numColorStages() const { return fColorStages.count(); }
+    int numCoverageStages() const { return fCoverageStages.count(); }
+    int numTotalStages() const { return this->numColorStages() + this->numCoverageStages(); }
+
+    const GrEffectStage& getColorStage(int s) const { return fColorStages[s]; }
+    const GrEffectStage& getCoverageStage(int s) const { return fCoverageStages[s]; }
 
     GrPaint& operator=(const GrPaint& paint) {
         fSrcBlendCoeff = paint.fSrcBlendCoeff;
@@ -129,111 +138,97 @@ public:
         fColor = paint.fColor;
         fCoverage = paint.fCoverage;
 
-        fColorFilterColor = paint.fColorFilterColor;
-        fColorFilterXfermode = paint.fColorFilterXfermode;
-        memcpy(fColorMatrix, paint.fColorMatrix, sizeof(fColorMatrix));
-        fColorMatrixEnabled = paint.fColorMatrixEnabled;
+        fColorStages = paint.fColorStages;
+        fCoverageStages = paint.fCoverageStages;
 
-        for (int i = 0; i < kMaxTextures; ++i) {
-            GrSafeUnref(fTextures[i]);
-            fTextureSamplers[i] = paint.fTextureSamplers[i];
-            fTextures[i] = paint.fTextures[i];
-            GrSafeRef(fTextures[i]);
-        }
-        for (int i = 0; i < kMaxMasks; ++i) {
-            GrSafeUnref(fMaskTextures[i]);
-            fMaskSamplers[i] = paint.fMaskSamplers[i];
-            fMaskTextures[i] = paint.fMaskTextures[i];
-            GrSafeRef(fMaskTextures[i]);
-        }
         return *this;
     }
 
-    ~GrPaint() {
-        for (int i = 0; i < kMaxTextures; ++i) {
-            GrSafeUnref(fTextures[i]);
-        }
-        for (int i = 0; i < kMaxMasks; ++i) {
-            GrSafeUnref(fMaskTextures[i]);
-        }
-    }
-
-    // sets paint to src-over, solid white, no texture, no mask
+    /**
+     * Resets the paint to the defaults.
+     */
     void reset() {
         this->resetBlend();
         this->resetOptions();
         this->resetColor();
         this->resetCoverage();
-        this->resetTextures();
-        this->resetColorFilter();
-        this->resetMasks();
+        this->resetStages();
     }
 
-    void resetColorFilter() {
-        fColorFilterXfermode = SkXfermode::kDst_Mode;
-        fColorFilterColor = GrColorPackRGBA(0xff, 0xff, 0xff, 0xff);
-        memset(fColorMatrix, 0, sizeof(fColorMatrix));
-        fColorMatrixEnabled = false;
-    }
+    /**
+     * Determines whether the drawing with this paint is opaque with respect to both color blending
+     * and fractional coverage. It does not consider whether AA has been enabled on the paint or
+     * not. Depending upon whether multisampling or coverage-based AA is in use, AA may make the
+     * result only apply to the interior of primitives.
+     *
+     */
+    bool isOpaque() const;
 
-    bool hasTexture() const {
-        return 0 != this->getActiveTextureStageMask();
-    }
-
-    bool hasMask() const {
-        return 0 != this->getActiveMaskStageMask();
-    }
-
-    bool hasTextureOrMask() const {
-        return this->hasTexture() || this->hasMask();
-    }
-
-    // helpers for GrContext, GrTextContext
-    int getActiveTextureStageMask() const {
-        int mask = 0;
-        for (int i = 0; i < kMaxTextures; ++i) {
-            if (NULL != fTextures[i]) {
-                mask |= 1 << (i + kFirstTextureStage);
-            }
-        }
-        return mask;
-    }
-
-    int getActiveMaskStageMask() const {
-        int mask = 0;
-        for (int i = 0; i < kMaxMasks; ++i) {
-            if (NULL != fMaskTextures[i]) {
-                mask |= 1 << (i + kFirstMaskStage);
-            }
-        }
-        return mask;
-    }
-    
-    int getActiveStageMask() const {
-        return this->getActiveTextureStageMask() |
-                this->getActiveMaskStageMask();
-    }
-
-    // internal use
-    // GrPaint's textures and masks map to the first N stages
-    // of GrDrawTarget in that order (textures followed by masks)
-    enum {
-        kFirstTextureStage = 0,
-        kFirstMaskStage = kMaxTextures,
-        kTotalStages = kMaxTextures + kMaxMasks,
-    };
+    /**
+     * Returns true if isOpaque would return true and the paint represents a solid constant color
+     * draw. If the result is true, constantColor will be updated to contain the constant color.
+     */
+    bool isOpaqueAndConstantColor(GrColor* constantColor) const;
 
 private:
 
-    GrSamplerState              fTextureSamplers[kMaxTextures];
-    GrSamplerState              fMaskSamplers[kMaxMasks];
+    /**
+     * Helper for isOpaque and isOpaqueAndConstantColor.
+     */
+    bool getOpaqueAndKnownColor(GrColor* solidColor, uint32_t* solidColorKnownComponents) const;
 
-    GrTexture*      fTextures[kMaxTextures];
-    GrTexture*      fMaskTextures[kMaxMasks];
+    /**
+     * Called when the source coord system from which geometry is rendered changes. It ensures that
+     * the local coordinates seen by effects remains unchanged. oldToNew gives the transformation
+     * from the previous coord system to the new coord system.
+     */
+    void localCoordChange(const SkMatrix& oldToNew) {
+        for (int i = 0; i < fColorStages.count(); ++i) {
+            fColorStages[i].localCoordChange(oldToNew);
+        }
+        for (int i = 0; i < fCoverageStages.count(); ++i) {
+            fCoverageStages[i].localCoordChange(oldToNew);
+        }
+    }
+
+    bool localCoordChangeInverse(const SkMatrix& newToOld) {
+        SkMatrix oldToNew;
+        bool computed = false;
+        for (int i = 0; i < fColorStages.count(); ++i) {
+            if (!computed && !newToOld.invert(&oldToNew)) {
+                return false;
+            } else {
+                computed = true;
+            }
+            fColorStages[i].localCoordChange(oldToNew);
+        }
+        for (int i = 0; i < fCoverageStages.count(); ++i) {
+            if (!computed && !newToOld.invert(&oldToNew)) {
+                return false;
+            } else {
+                computed = true;
+            }
+            fCoverageStages[i].localCoordChange(oldToNew);
+        }
+        return true;
+    }
+
+    friend class GrContext; // To access above two functions
+
+    SkSTArray<4, GrEffectStage> fColorStages;
+    SkSTArray<2, GrEffectStage> fCoverageStages;
+
+    GrBlendCoeff                fSrcBlendCoeff;
+    GrBlendCoeff                fDstBlendCoeff;
+    bool                        fAntiAlias;
+    bool                        fDither;
+
+    GrColor                     fColor;
+    uint8_t                     fCoverage;
 
     void resetBlend() {
-        fSrcBlendCoeff = kOne_BlendCoeff;
-        fDstBlendCoeff = kZero_BlendCoeff;
+        fSrcBlendCoeff = kOne_GrBlendCoeff;
+        fDstBlendCoeff = kZero_GrBlendCoeff;
     }
 
     void resetOptions() {
@@ -249,18 +244,9 @@ private:
         fCoverage = 0xff;
     }
 
-    void resetTextures() {
-        for (int i = 0; i < kMaxTextures; ++i) {
-            this->setTexture(i, NULL);
-            fTextureSamplers[i].reset();
-        }
-    }
-
-    void resetMasks() {
-        for (int i = 0; i < kMaxMasks; ++i) {
-            this->setMask(i, NULL);
-            fMaskSamplers[i].reset();
-        }
+    void resetStages() {
+        fColorStages.reset();
+        fCoverageStages.reset();
     }
 };
 

@@ -5,14 +5,18 @@
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
+
+// This test only works with the GPU backend.
+
 #include "gm.h"
+
+#if SK_SUPPORT_GPU
 #include "GrContext.h"
+#include "effects/GrSimpleTextureEffect.h"
 #include "SkColorPriv.h"
 #include "SkDevice.h"
 
 namespace skiagm {
-
-extern GrContext* GetGr();
 
 static const int S = 200;
 
@@ -31,12 +35,14 @@ protected:
         return make_isize(2*S, 2*S);
     }
 
+    virtual uint32_t onGetFlags() const SK_OVERRIDE { return kGPUOnly_Flag; }
+
     virtual void onDraw(SkCanvas* canvas) {
-        SkDevice* device = canvas->getDevice();
-        GrRenderTarget* target = (GrRenderTarget*) device->accessRenderTarget();
-        GrContext* ctx = GetGr();
+        SkBaseDevice* device = canvas->getTopDevice();
+        GrRenderTarget* target = device->accessRenderTarget();
+        GrContext* ctx = canvas->getGrContext();
         if (ctx && target) {
-            SkPMColor gTextureData[(2 * S) * (2 * S)];
+            SkAutoTArray<SkPMColor> gTextureData((2 * S) * (2 * S));
             static const int stride = 2 * S;
             static const SkPMColor gray  = SkPackARGB32(0x40, 0x40, 0x40, 0x40);
             static const SkPMColor white = SkPackARGB32(0xff, 0xff, 0xff, 0xff);
@@ -78,27 +84,24 @@ protected:
                 // use RT flag bit because in GL it makes the texture be bottom-up
                 desc.fFlags     = i ? kRenderTarget_GrTextureFlagBit :
                                       kNone_GrTextureFlags;
-                desc.fConfig    = kSkia8888_PM_GrPixelConfig;
+                desc.fConfig    = kSkia8888_GrPixelConfig;
                 desc.fWidth     = 2 * S;
                 desc.fHeight    = 2 * S;
-                desc.fSampleCnt = 0;
-                GrTexture* texture = 
-                    ctx->createUncachedTexture(desc, gTextureData, 0);
+                GrTexture* texture =
+                    ctx->createUncachedTexture(desc, gTextureData.get(), 0);
 
                 if (!texture) {
                     return;
                 }
-                GrAutoUnref au(texture);
+                SkAutoUnref au(texture);
 
-                ctx->setClip(GrRect::MakeWH(2*S, 2*S));
+                GrContext::AutoClip acs(ctx, SkRect::MakeWH(2*S, 2*S));
+
                 ctx->setRenderTarget(target);
 
                 GrPaint paint;
-                paint.reset();
-                paint.fColor = 0xffffffff;
-                paint.fSrcBlendCoeff = kOne_BlendCoeff;
-                paint.fDstBlendCoeff = kISA_BlendCoeff;
-                GrMatrix vm;
+                paint.setBlendFunc(kOne_GrBlendCoeff, kISA_GrBlendCoeff);
+                SkMatrix vm;
                 if (i) {
                     vm.setRotate(90 * SK_Scalar1,
                                  S * SK_Scalar1,
@@ -107,28 +110,26 @@ protected:
                     vm.reset();
                 }
                 ctx->setMatrix(vm);
-                GrMatrix tm;
+                SkMatrix tm;
                 tm = vm;
-                GrMatrix* sampleMat = paint.textureSampler(0)->matrix();
-                *sampleMat = vm;
-                sampleMat->postIDiv(2*S, 2*S);
-                paint.setTexture(0, texture);
+                tm.postIDiv(2*S, 2*S);
+                paint.addColorTextureEffect(texture, tm);
 
-                ctx->drawRect(paint, GrRect::MakeWH(2*S, 2*S));
+                ctx->drawRect(paint, SkRect::MakeWH(2*S, 2*S));
 
                 // now update the lower right of the texture in first pass
                 // or upper right in second pass
                 offset = 0;
                 for (int y = 0; y < S; ++y) {
                     for (int x = 0; x < S; ++x) {
-                        gTextureData[offset + y * stride + x] = 
+                        gTextureData[offset + y * stride + x] =
                             ((x + y) % 2) ? (i ? green : red) : blue;
                     }
                 }
                 texture->writePixels(S, (i ? 0 : S), S, S,
-                                     texture->config(), gTextureData,
+                                     texture->config(), gTextureData.get(),
                                      4 * stride);
-                ctx->drawRect(paint, GrRect::MakeWH(2*S, 2*S));
+                ctx->drawRect(paint, SkRect::MakeWH(2*S, 2*S));
             }
         }
     }
@@ -144,3 +145,4 @@ static GMRegistry reg(MyFactory);
 
 }
 
+#endif

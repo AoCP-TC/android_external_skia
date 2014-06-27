@@ -1,11 +1,12 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
+
 #include "Test.h"
+#include "TestClassDef.h"
 #include "SkGeometry.h"
 
 static bool nearly_equal(const SkPoint& a, const SkPoint& b) {
@@ -15,7 +16,7 @@ static bool nearly_equal(const SkPoint& a, const SkPoint& b) {
 static void testChopCubic(skiatest::Reporter* reporter) {
     /*
         Inspired by this test, which used to assert that the tValues had dups
-     
+
         <path stroke="#202020" d="M0,0 C0,0 1,1 2190,5130 C2190,5070 2220,5010 2205,4980" />
      */
     const SkPoint src[] = {
@@ -28,10 +29,12 @@ static void testChopCubic(skiatest::Reporter* reporter) {
     SkScalar tValues[3];
     // make sure we don't assert internally
     int count = SkChopCubicAtMaxCurvature(src, dst, tValues);
+    if (false) { // avoid bit rot, suppress warning
+        REPORTER_ASSERT(reporter, count);
+    }
 }
 
-
-static void TestGeometry(skiatest::Reporter* reporter) {
+DEF_TEST(Geometry, reporter) {
     SkPoint pts[3], dst[5];
 
     pts[0].set(0, 0);
@@ -54,9 +57,6 @@ static void TestGeometry(skiatest::Reporter* reporter) {
     for (int i = 0; i < 4; ++i) {
         REPORTER_ASSERT(reporter, nearly_equal(cubic[i], dst[i]));
     }
-    
+
     testChopCubic(reporter);
 }
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("Geometry", GeometryTestClass, TestGeometry)

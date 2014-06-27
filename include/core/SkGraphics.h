@@ -12,11 +12,11 @@
 
 #include "SkTypes.h"
 
-class SkGraphics {
+class SK_API SkGraphics {
 public:
     /**
      *  Call this at process initialization time if your environment does not
-     *  permit static global initializers that execute code. Note that 
+     *  permit static global initializers that execute code. Note that
      *  Init() is not thread-safe.
      */
     static void Init();
@@ -38,7 +38,7 @@ public:
      *  This max can be changed by calling SetFontCacheLimit().
      */
     static size_t GetFontCacheLimit();
-    
+
     /**
      *  Specify the max number of bytes that should be used by the font cache.
      *  If the cache needs to allocate more, it will purge previous entries.
@@ -49,12 +49,40 @@ public:
     static size_t SetFontCacheLimit(size_t bytes);
 
     /**
+     *  Return the number of bytes currently used by the font cache.
+     */
+    static size_t GetFontCacheUsed();
+
+    /**
+     *  Return the number of entries in the font cache.
+     *  A cache "entry" is associated with each typeface + pointSize + matrix.
+     */
+    static int GetFontCacheCountUsed();
+
+    /**
+     *  Return the current limit to the number of entries in the font cache.
+     *  A cache "entry" is associated with each typeface + pointSize + matrix.
+     */
+    static int GetFontCacheCountLimit();
+
+    /**
+     *  Set the limit to the number of entries in the font cache, and return
+     *  the previous value. If this new value is lower than the previous,
+     *  it will automatically try to purge entries to meet the new limit.
+     */
+    static int SetFontCacheCountLimit(int count);
+
+    /**
      *  For debugging purposes, this will attempt to purge the font cache. It
      *  does not change the limit, but will cause subsequent font measures and
      *  draws to be recreated, since they will no longer be in the cache.
      */
     static void PurgeFontCache();
-    
+
+    static size_t GetImageCacheBytesUsed();
+    static size_t GetImageCacheByteLimit();
+    static size_t SetImageCacheByteLimit(size_t newLimit);
+
     /**
      *  Applications with command line options may pass optional state, such
      *  as cache sizes, here, for instance:
@@ -64,7 +92,27 @@ public:
      *  This format is subject to change.
      */
     static void SetFlags(const char* flags);
-    
+
+    /**
+     *  Return the max number of bytes that should be used by the thread-local
+     *  font cache.
+     *  If the cache needs to allocate more, it will purge previous entries.
+     *  This max can be changed by calling SetFontCacheLimit().
+     *
+     *  If this thread has never called SetTLSFontCacheLimit, or has called it
+     *  with 0, then this thread is using the shared font cache. In that case,
+     *  this function will always return 0, and the caller may want to call
+     *  GetFontCacheLimit.
+     */
+    static size_t GetTLSFontCacheLimit();
+
+    /**
+     *  Specify the max number of bytes that should be used by the thread-local
+     *  font cache. If this value is 0, then this thread will use the shared
+     *  global font cache.
+     */
+    static void SetTLSFontCacheLimit(size_t bytes);
+
 private:
     /** This is automatically called by SkGraphics::Init(), and must be
         implemented by the host OS. This allows the host OS to register a callback
@@ -84,4 +132,3 @@ public:
 };
 
 #endif
-

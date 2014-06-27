@@ -39,7 +39,7 @@ static SkScalar draw_bm(SkCanvas* canvas, const SkBitmap& bm,
 static SkScalar draw_set(SkCanvas* c, const SkBitmap& bm, SkScalar x,
                          SkPaint* p) {
     x += draw_bm(c, bm, x, 0, p);
-    p->setFilterBitmap(true);
+    p->setFilterLevel(SkPaint::kLow_FilterLevel);
     x += draw_bm(c, bm, x, 0, p);
     p->setDither(true);
     return x + draw_bm(c, bm, x, 0, p);
@@ -47,7 +47,6 @@ static SkScalar draw_set(SkCanvas* c, const SkBitmap& bm, SkScalar x,
 
 static const char* gConfigNames[] = {
     "unknown config",
-    "A1",
     "A8",
     "Index8",
     "565",
@@ -78,14 +77,21 @@ static SkScalar draw_row(SkCanvas* canvas, const SkBitmap& bm) {
 }
 
 class FilterGM : public GM {
-public:
-    SkBitmap    fBM8, fBM4444, fBM16, fBM32;
-
-	FilterGM() {
+    bool fOnce;
+    void init() {
+        if (fOnce) {
+            return;
+        }
+        fOnce = true;
         make_bm(&fBM8);
         fBM8.copyTo(&fBM4444, SkBitmap::kARGB_4444_Config);
         fBM8.copyTo(&fBM16, SkBitmap::kRGB_565_Config);
         fBM8.copyTo(&fBM32, SkBitmap::kARGB_8888_Config);
+    }
+public:
+    SkBitmap    fBM8, fBM4444, fBM16, fBM32;
+
+    FilterGM() : fOnce(false) {
         this->setBGColor(0xFFDDDDDD);
     }
 
@@ -94,11 +100,12 @@ protected:
         return SkString("bitmapfilters");
     }
 
-	virtual SkISize onISize() {
+    virtual SkISize onISize() {
         return make_isize(540, 330);
     }
 
     virtual void onDraw(SkCanvas* canvas) {
+        this->init();
 
         SkScalar x = SkIntToScalar(10);
         SkScalar y = SkIntToScalar(10);
@@ -123,6 +130,3 @@ static GM* MyFactory(void*) { return new FilterGM; }
 static GMRegistry reg(MyFactory);
 
 }
-
-
-

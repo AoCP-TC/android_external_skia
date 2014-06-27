@@ -1,11 +1,9 @@
-
 /*
  * Copyright 2006 The Android Open Source Project
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
-
 
 #ifndef SkEmbossMaskFilter_DEFINED
 #define SkEmbossMaskFilter_DEFINED
@@ -16,7 +14,7 @@
 
     This mask filter creates a 3D emboss look, by specifying a light and blur amount.
 */
-class SkEmbossMaskFilter : public SkMaskFilter {
+class SK_API SkEmbossMaskFilter : public SkMaskFilter {
 public:
     struct Light {
         SkScalar    fDirection[3];  // x,y,z
@@ -25,35 +23,30 @@ public:
         uint8_t     fSpecular;      // exponent, 4.4 right now
     };
 
+    SkEmbossMaskFilter(SkScalar blurSigma, const Light& light);
+
+    SK_ATTR_DEPRECATED("use sigma version")
     SkEmbossMaskFilter(const Light& light, SkScalar blurRadius);
 
     // overrides from SkMaskFilter
     //  This method is not exported to java.
-    virtual SkMask::Format getFormat();
+    virtual SkMask::Format getFormat() const SK_OVERRIDE;
     //  This method is not exported to java.
     virtual bool filterMask(SkMask* dst, const SkMask& src, const SkMatrix&,
-                            SkIPoint* margin);
+                            SkIPoint* margin) const SK_OVERRIDE;
 
-    // overrides from SkFlattenable
-
-    //  This method is not exported to java.
-    virtual Factory getFactory();
-    //  This method is not exported to java.
-    virtual void flatten(SkFlattenableWriteBuffer&);
-
-    SK_DECLARE_FLATTENABLE_REGISTRAR()
+    SkDEVCODE(virtual void toString(SkString* str) const SK_OVERRIDE;)
+    SK_DECLARE_PUBLIC_FLATTENABLE_DESERIALIZATION_PROCS(SkEmbossMaskFilter)
 
 protected:
     SkEmbossMaskFilter(SkFlattenableReadBuffer&);
+    virtual void flatten(SkFlattenableWriteBuffer&) const SK_OVERRIDE;
 
 private:
     Light       fLight;
-    SkScalar    fBlurRadius;
+    SkScalar    fBlurSigma;
 
-    static SkFlattenable* CreateProc(SkFlattenableReadBuffer&);
-    
     typedef SkMaskFilter INHERITED;
 };
 
 #endif
-

@@ -1,12 +1,12 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
-#include "Test.h"
 
+#include "Test.h"
+#include "TestClassDef.h"
 #include "SkCanvas.h"
 #include "SkPaint.h"
 #include "SkCubicClipper.h"
@@ -20,8 +20,8 @@ static void test_giantClip() {
     bm.setConfig(SkBitmap::kARGB_8888_Config, 64919, 1);
     bm.allocPixels();
     SkCanvas canvas(bm);
-    canvas.clear(0);
-    
+    canvas.clear(SK_ColorTRANSPARENT);
+
     SkPath path;
     path.moveTo(0, 0); path.lineTo(1, 0); path.lineTo(33, 1);
     SkPaint paint;
@@ -30,7 +30,7 @@ static void test_giantClip() {
 }
 
 static void PrintCurve(const char *name, const SkPoint crv[4]) {
-    printf("%s: %.10g, %.10g, %.10g, %.10g, %.10g, %.10g, %.10g, %.10g\n",
+    SkDebugf("%s: %.10g, %.10g, %.10g, %.10g, %.10g, %.10g, %.10g, %.10g\n",
             name,
             (float)crv[0].fX, (float)crv[0].fY,
             (float)crv[1].fX, (float)crv[1].fY,
@@ -44,8 +44,8 @@ static bool CurvesAreEqual(const SkPoint c0[4],
                            const SkPoint c1[4],
                            float tol) {
     for (int i = 0; i < 4; i++) {
-        if (SkScalarAbs(c0[i].fX - c1[i].fX) > SkFloatToScalar(tol) ||
-            SkScalarAbs(c0[i].fY - c1[i].fY) > SkFloatToScalar(tol)
+        if (SkScalarAbs(c0[i].fX - c1[i].fX) > tol ||
+            SkScalarAbs(c0[i].fY - c1[i].fY) > tol
         ) {
             PrintCurve("c0", c0);
             PrintCurve("c1", c1);
@@ -61,15 +61,15 @@ static SkPoint* SetCurve(float x0, float y0,
                          float x2, float y2,
                          float x3, float y3,
                          SkPoint crv[4]) {
-    crv[0].fX = SkFloatToScalar(x0);   crv[0].fY = SkFloatToScalar(y0);
-    crv[1].fX = SkFloatToScalar(x1);   crv[1].fY = SkFloatToScalar(y1);
-    crv[2].fX = SkFloatToScalar(x2);   crv[2].fY = SkFloatToScalar(y2);
-    crv[3].fX = SkFloatToScalar(x3);   crv[3].fY = SkFloatToScalar(y3);
+    crv[0].fX = x0;   crv[0].fY = y0;
+    crv[1].fX = x1;   crv[1].fY = y1;
+    crv[2].fX = x2;   crv[2].fY = y2;
+    crv[3].fX = x3;   crv[3].fY = y3;
     return crv;
 }
 
 
-static void TestCubicClipping(skiatest::Reporter* reporter) {
+DEF_TEST(ClipCubic, reporter) {
     static SkPoint crv[4] = {
         { SkIntToScalar(0), SkIntToScalar(0)  },
         { SkIntToScalar(2), SkIntToScalar(3)  },
@@ -81,7 +81,7 @@ static void TestCubicClipping(skiatest::Reporter* reporter) {
     SkPoint clipped[4], shouldbe[4];
     SkIRect clipRect;
     bool success;
-    const float tol = SkFloatToScalar(1e-4);
+    const float tol = 1e-4f;
 
     // Test no clip, with plenty of room.
     clipRect.set(-2, -2, 6, 14);
@@ -119,9 +119,9 @@ static void TestCubicClipping(skiatest::Reporter* reporter) {
     success = clipper.clipCubic(crv, clipped);
     REPORTER_ASSERT(reporter, success == true);
     REPORTER_ASSERT(reporter, CurvesAreEqual(clipped, SetCurve(
-        0.5126125216, 1,
-        1.841195941,  4.337081432,
-        1.297019958,  10.19801331,
+        0.5126125216f, 1,
+        1.841195941f,  4.337081432f,
+        1.297019958f,  10.19801331f,
         4,            12,
         shouldbe), tol));
 
@@ -131,9 +131,9 @@ static void TestCubicClipping(skiatest::Reporter* reporter) {
     success = clipper.clipCubic(crv, clipped);
     REPORTER_ASSERT(reporter, success == true);
     REPORTER_ASSERT(reporter, CurvesAreEqual(clipped, SetCurve(
-        00.8412352204, 2,
-        1.767683744,   5.400758266,
-        1.55052948,    10.36701965,
+        00.8412352204f, 2,
+        1.767683744f,   5.400758266f,
+        1.55052948f,    10.36701965f,
         4,             12,
         shouldbe), tol));
 
@@ -144,9 +144,9 @@ static void TestCubicClipping(skiatest::Reporter* reporter) {
     REPORTER_ASSERT(reporter, success == true);
     REPORTER_ASSERT(reporter, CurvesAreEqual(clipped, SetCurve(
         0,           0,
-        1.742904663, 2.614356995,
-        1.207521796, 8.266430855,
-        3.026495695, 11,
+        1.742904663f, 2.614356995f,
+        1.207521796f, 8.266430855f,
+        3.026495695f, 11,
         shouldbe), tol));
 
     // Test clip at 10.
@@ -156,16 +156,10 @@ static void TestCubicClipping(skiatest::Reporter* reporter) {
     REPORTER_ASSERT(reporter, success == true);
     REPORTER_ASSERT(reporter, CurvesAreEqual(clipped, SetCurve(
         0,           0,
-        1.551193237, 2.326789856,
-        1.297736168, 7.059780121,
-        2.505550385, 10,
+        1.551193237f, 2.326789856f,
+        1.297736168f, 7.059780121f,
+        2.505550385f, 10,
         shouldbe), tol));
 
     test_giantClip();
 }
-
-
-
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("CubicClipper", CubicClippingTestClass, TestCubicClipping)

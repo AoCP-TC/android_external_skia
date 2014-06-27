@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
@@ -12,7 +11,7 @@
 
 #include "GrGLIRect.h"
 #include "GrRenderTarget.h"
-#include "GrScalar.h"
+#include "SkScalar.h"
 
 class GrGpuGL;
 class GrGLTexture;
@@ -26,12 +25,14 @@ public:
     enum { kUnresolvableFBOID = 0 };
 
     struct Desc {
-        GrGLuint      fRTFBOID;
-        GrGLuint      fTexFBOID;
-        GrGLuint      fMSColorRenderbufferID;
-        bool          fOwnIDs;
-        GrPixelConfig fConfig;
-        int           fSampleCnt;
+        GrGLuint         fRTFBOID;
+        GrGLuint         fTexFBOID;
+        GrGLuint         fMSColorRenderbufferID;
+        bool             fIsWrapped;
+        GrPixelConfig    fConfig;
+        int              fSampleCnt;
+        GrSurfaceOrigin  fOrigin;
+        bool             fCheckAllocation;
     };
 
     // creates a GrGLRenderTarget associated with a texture
@@ -51,19 +52,19 @@ public:
     void setViewport(const GrGLIRect& rect) { fViewport = rect; }
     const GrGLIRect& getViewport() const { return fViewport; }
 
-    // The following two functions return the same ID when a 
-    // texture-rendertarget is multisampled, and different IDs when
+    // The following two functions return the same ID when a
+    // texture/render target is multisampled, and different IDs when
     // it is.
     // FBO ID used to render into
     GrGLuint renderFBOID() const { return fRTFBOID; }
     // FBO ID that has texture ID attached.
     GrGLuint textureFBOID() const { return fTexFBOID; }
 
-    // override of GrRenderTarget 
-    virtual intptr_t getRenderTargetHandle() const {
-        return this->renderFBOID(); 
+    // override of GrRenderTarget
+    virtual GrBackendObject getRenderTargetHandle() const {
+        return this->renderFBOID();
     }
-    virtual intptr_t getRenderTargetResolvedHandle() const {
+    virtual GrBackendObject getRenderTargetResolvedHandle() const {
         return this->textureFBOID();
     }
     virtual ResolveType getResolveType() const {
@@ -81,8 +82,8 @@ public:
 
 protected:
     // override of GrResource
-    virtual void onAbandon();
-    virtual void onRelease();
+    virtual void onAbandon() SK_OVERRIDE;
+    virtual void onRelease() SK_OVERRIDE;
 
 private:
     GrGLuint      fRTFBOID;
@@ -90,17 +91,13 @@ private:
 
     GrGLuint      fMSColorRenderbufferID;
 
-    // Should this object delete IDs when it is destroyed or does someone
-    // else own them.
-    bool        fOwnIDs;
-
-    // when we switch to this rendertarget we want to set the viewport to
+    // when we switch to this render target we want to set the viewport to
     // only render to to content area (as opposed to the whole allocation) and
     // we want the rendering to be at top left (GL has origin in bottom left)
     GrGLIRect fViewport;
 
     // non-NULL if this RT was created by Gr with an associated GrGLTexture.
-    GrGLTexID* fTexIDObj;
+    SkAutoTUnref<GrGLTexID> fTexIDObj;
 
     void init(const Desc& desc, const GrGLIRect& viewport, GrGLTexID* texID);
 

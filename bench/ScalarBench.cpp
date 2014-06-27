@@ -8,14 +8,18 @@
 #include "SkBenchmark.h"
 #include "SkFloatBits.h"
 #include "SkRandom.h"
+#include "SkRect.h"
 #include "SkString.h"
 
 class ScalarBench : public SkBenchmark {
     SkString    fName;
-    enum { N = 100000 };
 public:
-    ScalarBench(void* param, const char name[]) : INHERITED(param) {
+    ScalarBench(const char name[])  {
         fName.printf("scalar_%s", name);
+    }
+
+    virtual bool isSuitableFor(Backend backend) SK_OVERRIDE {
+        return backend == kNonRendering_Backend;
     }
 
     virtual void performTest() = 0;
@@ -23,13 +27,12 @@ public:
 protected:
     virtual int mulLoopCount() const { return 1; }
 
-    virtual const char* onGetName() {
+    virtual const char* onGetName() SK_OVERRIDE {
         return fName.c_str();
     }
 
-    virtual void onDraw(SkCanvas* canvas) {
-        int n = SkBENCHLOOP(N * this->mulLoopCount());
-        for (int i = 0; i < n; i++) {
+    virtual void onDraw(const int loops, SkCanvas* canvas) {
+        for (int i = 0; i < loops; i++) {
             this->performTest();
         }
     }
@@ -62,7 +65,7 @@ template <typename T> void init9(T array[9]) {
 
 class FloatComparisonBench : public ScalarBench {
 public:
-    FloatComparisonBench(void* param) : INHERITED(param, "compare_float") {
+    FloatComparisonBench() : INHERITED("compare_float") {
         init9(fArray);
     }
 protected:
@@ -78,8 +81,8 @@ private:
 
 class ForcedIntComparisonBench : public ScalarBench {
 public:
-    ForcedIntComparisonBench(void* param)
-        : INHERITED(param, "compare_forced_int") {
+    ForcedIntComparisonBench()
+    : INHERITED("compare_forced_int") {
         init9(fArray);
     }
 protected:
@@ -97,8 +100,77 @@ private:
     typedef ScalarBench INHERITED;
 };
 
-static SkBenchmark* S0(void* p) { return new FloatComparisonBench(p); }
-static SkBenchmark* S1(void* p) { return new ForcedIntComparisonBench(p); }
+class IsFiniteScalarBench : public ScalarBench {
+public:
+    IsFiniteScalarBench() : INHERITED("isfinite") {
+        SkRandom rand;
+        for (size_t i = 0; i < ARRAY_N; ++i) {
+            fArray[i] = rand.nextSScalar1();
+        }
+    }
+protected:
+    virtual int mulLoopCount() const { return 1; }
+    virtual void performTest() SK_OVERRIDE {
+        int sum = 0;
+        for (size_t i = 0; i < ARRAY_N; ++i) {
+            // We pass -fArray[i], so the compiler can't cheat and treat the
+            // value as an int (even though we tell it that it is a float)
+            sum += SkScalarIsFinite(-fArray[i]);
+        }
+        // we do this so the compiler won't optimize our loop away...
+        this->doSomething(fArray, sum);
+    }
 
-static BenchRegistry gReg0(S0);
-static BenchRegistry gReg1(S1);
+    virtual void doSomething(SkScalar array[], int sum) {}
+private:
+    enum {
+        ARRAY_N = 64
+    };
+    SkScalar fArray[ARRAY_N];
+
+    typedef ScalarBench INHERITED;
+};
+
+///////////////////////////////////////////////////////////////////////////////
+
+class RectBoundsBench : public SkBenchmark {
+    enum {
+        PTS = 100,
+    };
+    SkPoint fPts[PTS];
+
+public:
+    RectBoundsBench() {
+        SkRandom rand;
+        for (int i = 0; i < PTS; ++i) {
+            fPts[i].fX = rand.nextSScalar1();
+            fPts[i].fY = rand.nextSScalar1();
+        }
+    }
+
+    virtual bool isSuitableFor(Backend backend) SK_OVERRIDE {
+        return backend == kNonRendering_Backend;
+    }
+
+protected:
+    virtual const char* onGetName() SK_OVERRIDE {
+        return "rect_bounds";
+    }
+
+    virtual void onDraw(const int loops, SkCanvas* canvas) SK_OVERRIDE {
+        SkRect r;
+        for (int i = 0; i < loops; ++i) {
+            r.set(fPts, PTS);
+        }
+    }
+
+private:
+    typedef SkBenchmark INHERITED;
+};
+
+///////////////////////////////////////////////////////////////////////////////
+
+DEF_BENCH( return new FloatComparisonBench(); )
+DEF_BENCH( return new ForcedIntComparisonBench(); )
+DEF_BENCH( return new RectBoundsBench(); )
+DEF_BENCH( return new IsFiniteScalarBench(); )

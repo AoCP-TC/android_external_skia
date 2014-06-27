@@ -9,9 +9,48 @@
 #include "SkPaint.h"
 #include "SkRandom.h"
 
-namespace skiagm {
+// skbug.com/1316 shows that this cubic, when slightly clipped, creates big
+// (incorrect) changes to its control points.
+class ClippedCubicGM : public skiagm::GM {
+public:
+    ClippedCubicGM() {}
 
-class CubicPathGM : public GM {
+protected:
+    SkString onShortName() {
+        return SkString("clippedcubic");
+    }
+
+    SkISize onISize() { return SkISize::Make(1240, 390); }
+
+    virtual void onDraw(SkCanvas* canvas) {
+        SkPath path;
+        path.moveTo(0, 0);
+        path.cubicTo(140, 150, 40, 10, 170, 150);
+
+        SkPaint paint;
+        SkRect bounds = path.getBounds();
+
+        for (SkScalar dy = -1; dy <= 1; dy += 1) {
+            canvas->save();
+            for (SkScalar dx = -1; dx <= 1; dx += 1) {
+                canvas->save();
+                canvas->clipRect(bounds);
+                canvas->translate(dx, dy);
+                canvas->drawPath(path, paint);
+                canvas->restore();
+
+                canvas->translate(bounds.width(), 0);
+            }
+            canvas->restore();
+            canvas->translate(0, bounds.height());
+        }
+    }
+
+private:
+    typedef skiagm::GM INHERITED;
+};
+
+class CubicPathGM : public skiagm::GM {
 public:
     CubicPathGM() {}
 
@@ -19,9 +58,9 @@ protected:
     SkString onShortName() {
         return SkString("cubicpath");
     }
-        
-    SkISize onISize() { return make_isize(1240, 390); }
-    
+
+    SkISize onISize() { return SkISize::Make(1240, 390); }
+
     void drawPath(SkPath& path,SkCanvas* canvas,SkColor color,
                   const SkRect& clip,SkPaint::Cap cap, SkPaint::Join join,
                   SkPaint::Style style, SkPath::FillType fill,
@@ -38,7 +77,7 @@ protected:
         canvas->drawPath(path, paint);
         canvas->restore();
     }
-    
+
     virtual void onDraw(SkCanvas* canvas) {
         struct FillAndName {
             SkPath::FillType fFill;
@@ -92,7 +131,7 @@ protected:
                             20 * SK_Scalar1,
                             titlePaint);
 
-        SkRandom rand;
+        SkLCGRandom rand;
         SkRect rect = SkRect::MakeWH(100*SK_Scalar1, 30*SK_Scalar1);
         canvas->save();
         canvas->translate(10 * SK_Scalar1, 30 * SK_Scalar1);
@@ -111,19 +150,19 @@ protected:
                     if (0 < style) {
                         canvas->translate(rect.width() + 40 * SK_Scalar1, 0);
                     }
-        
+
                     SkColor color = 0xff007000;
                     this->drawPath(path.fPath, canvas, color, rect,
                                     gCaps[cap].fCap, gCaps[cap].fJoin, gStyles[style].fStyle,
                                     gFills[fill].fFill, SK_Scalar1*10);
-        
+
                     SkPaint rectPaint;
                     rectPaint.setColor(SK_ColorBLACK);
                     rectPaint.setStyle(SkPaint::kStroke_Style);
                     rectPaint.setStrokeWidth(-1);
                     rectPaint.setAntiAlias(true);
                     canvas->drawRect(rect, rectPaint);
-        
+
                     SkPaint labelPaint;
                     labelPaint.setColor(color);
                     labelPaint.setAntiAlias(true);
@@ -149,12 +188,12 @@ protected:
         canvas->restore();
         canvas->restore();
     }
-    
+
 private:
-    typedef GM INHERITED;
+    typedef skiagm::GM INHERITED;
 };
 
-class CubicClosePathGM : public GM {
+class CubicClosePathGM : public skiagm::GM {
 public:
     CubicClosePathGM() {}
 
@@ -162,9 +201,9 @@ protected:
     SkString onShortName() {
         return SkString("cubicclosepath");
     }
-        
-    SkISize onISize() { return make_isize(1240, 390); }
-    
+
+    SkISize onISize() { return SkISize::Make(1240, 390); }
+
     void drawPath(SkPath& path,SkCanvas* canvas,SkColor color,
                   const SkRect& clip,SkPaint::Cap cap, SkPaint::Join join,
                   SkPaint::Style style, SkPath::FillType fill,
@@ -181,7 +220,7 @@ protected:
         canvas->drawPath(path, paint);
         canvas->restore();
     }
-    
+
     virtual void onDraw(SkCanvas* canvas) {
         struct FillAndName {
             SkPath::FillType fFill;
@@ -236,7 +275,7 @@ protected:
                             20 * SK_Scalar1,
                             titlePaint);
 
-        SkRandom rand;
+        SkLCGRandom rand;
         SkRect rect = SkRect::MakeWH(100*SK_Scalar1, 30*SK_Scalar1);
         canvas->save();
         canvas->translate(10 * SK_Scalar1, 30 * SK_Scalar1);
@@ -255,19 +294,19 @@ protected:
                     if (0 < style) {
                         canvas->translate(rect.width() + 40 * SK_Scalar1, 0);
                     }
-        
+
                     SkColor color = 0xff007000;
                     this->drawPath(path.fPath, canvas, color, rect,
                                     gCaps[cap].fCap, gCaps[cap].fJoin, gStyles[style].fStyle,
                                     gFills[fill].fFill, SK_Scalar1*10);
-        
+
                     SkPaint rectPaint;
                     rectPaint.setColor(SK_ColorBLACK);
                     rectPaint.setStyle(SkPaint::kStroke_Style);
                     rectPaint.setStrokeWidth(-1);
                     rectPaint.setAntiAlias(true);
                     canvas->drawRect(rect, rectPaint);
-        
+
                     SkPaint labelPaint;
                     labelPaint.setColor(color);
                     labelPaint.setAntiAlias(true);
@@ -293,17 +332,13 @@ protected:
         canvas->restore();
         canvas->restore();
     }
-    
+
 private:
-    typedef GM INHERITED;
+    typedef skiagm::GM INHERITED;
 };
 
 //////////////////////////////////////////////////////////////////////////////
 
-static GM* CubicPathFactory(void*) { return new CubicPathGM; }
-static GMRegistry regCubicPath(CubicPathFactory);
-
-static GM* CubicClosePathFactory(void*) { return new CubicClosePathGM; }
-static GMRegistry regCubicClosePath(CubicClosePathFactory);
-
-}
+DEF_GM( return new CubicPathGM; )
+DEF_GM( return new CubicClosePathGM; )
+DEF_GM( return new ClippedCubicGM; )

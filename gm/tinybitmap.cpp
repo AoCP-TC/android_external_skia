@@ -14,13 +14,10 @@
 namespace skiagm {
 
 static SkBitmap make_bitmap() {
+    const SkPMColor c[] = { SkPackARGB32(0x80, 0x80, 0, 0) };
+    SkColorTable* ctable = new SkColorTable(c, SK_ARRAY_COUNT(c));
+
     SkBitmap bm;
-
-    SkColorTable* ctable = new SkColorTable(1);
-    SkPMColor* c = ctable->lockColors();
-    c[0] = SkPackARGB32(0x80, 0x80, 0, 0);
-    ctable->unlockColors(true);
-
     bm.setConfig(SkBitmap::kIndex8_Config, 1, 1);
     bm.allocPixels(ctable);
     ctable->unref();
@@ -32,13 +29,11 @@ static SkBitmap make_bitmap() {
 }
 
 class TinyBitmapGM : public GM {
-    SkBitmap    fBM;
 public:
     TinyBitmapGM() {
         this->setBGColor(0xFFDDDDDD);
-        fBM = make_bitmap();
     }
-    
+
 protected:
     SkString onShortName() {
         return SkString("tinybitmap");
@@ -47,15 +42,16 @@ protected:
     virtual SkISize onISize() { return make_isize(100, 100); }
 
     virtual void onDraw(SkCanvas* canvas) {
-        SkShader* s = 
-            SkShader::CreateBitmapShader(fBM, SkShader::kRepeat_TileMode,
+        SkBitmap bm = make_bitmap();
+        SkShader* s =
+            SkShader::CreateBitmapShader(bm, SkShader::kRepeat_TileMode,
                                          SkShader::kMirror_TileMode);
         SkPaint paint;
         paint.setAlpha(0x80);
         paint.setShader(s)->unref();
         canvas->drawPaint(paint);
     }
-    
+
 private:
     typedef GM INHERITED;
 };

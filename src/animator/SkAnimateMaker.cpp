@@ -28,7 +28,7 @@ class DefaultTimeline : public SkAnimator::Timeline {
 } gDefaultTimeline;
 
 SkAnimateMaker::SkAnimateMaker(SkAnimator* animator, SkCanvas* canvas, SkPaint* paint)
-    : fActiveEvent(NULL), fAdjustedStart(0), fCanvas(canvas), fEnableTime(0), 
+    : fActiveEvent(NULL), fAdjustedStart(0), fCanvas(canvas), fEnableTime(0),
         fHostEventSinkID(0), fMinimumInterval((SkMSec) -1), fPaint(paint), fParentMaker(NULL),
         fTimeline(&gDefaultTimeline), fInInclude(false), fInMovie(false),
         fFirstScriptError(false), fLoaded(false), fIDs(256), fAnimator(animator)
@@ -82,7 +82,7 @@ bool SkAnimateMaker::computeID(SkDisplayable* displayable, SkDisplayable* parent
 
 SkDisplayable* SkAnimateMaker::createInstance(const char name[], size_t len) {
     SkDisplayTypes type = SkDisplayType::GetType(this, name, len );
-    if ((int)type >= 0) 
+    if ((int)type >= 0)
         return SkDisplayType::CreateInstance(this, type);
     return NULL;
 }
@@ -99,13 +99,15 @@ bool SkAnimateMaker::decodeURI(const char uri[]) {
 //  SkDebugf("animator decode %s\n", uri);
 
 //    SkStream* stream = SkStream::GetURIStream(fPrefix.c_str(), uri);
-    SkStream* stream = new SkFILEStream(uri);
-
-    SkAutoTDelete<SkStream> autoDel(stream);
-    bool success = decodeStream(stream);
-    if (hasError() && fError.hasNoun() == false)
-        fError.setNoun(uri);
-    return success;
+    SkAutoTUnref<SkStream> stream(SkStream::NewFromFile(uri));
+    if (stream.get()) {
+        bool success = decodeStream(stream);
+        if (hasError() && fError.hasNoun() == false)
+            fError.setNoun(uri);
+        return success;
+    } else {
+        return false;
+    }
 }
 
 #if defined SK_DEBUG && 0
@@ -124,7 +126,7 @@ void SkAnimateMaker::delayEnable(SkApply* apply, SkMSec time) {
     if (index < 0) {
         *fDelayed.append() = apply;
     }
-    
+
     (new SkEvent(SK_EventType_Delay, fAnimator->getSinkID()))->postTime(time);
 }
 
@@ -302,7 +304,7 @@ void SkAnimateMaker::setErrorString() {
 #if defined SK_DEBUG
         SkDebugf("%s\n", fErrorString.c_str());
 #endif
-    } 
+    }
 }
 
 void SkAnimateMaker::setEnableTime(SkMSec appTime, SkMSec expectedTime) {
@@ -330,7 +332,7 @@ void SkAnimateMaker::setEnableTime(SkMSec appTime, SkMSec expectedTime) {
     }
 }
 
-void SkAnimateMaker::setExtraPropertyCallBack(SkDisplayTypes type, 
+void SkAnimateMaker::setExtraPropertyCallBack(SkDisplayTypes type,
         SkScriptEngine::_propertyCallBack callBack, void* userStorage) {
     SkExtras** end = fExtras.end();
     for (SkExtras** extraPtr = fExtras.begin(); extraPtr < end; extraPtr++) {

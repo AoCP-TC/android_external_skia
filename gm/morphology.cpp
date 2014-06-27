@@ -8,8 +8,8 @@
 #include "gm.h"
 #include "SkMorphologyImageFilter.h"
 
-#define WIDTH 640
-#define HEIGHT 480
+#define WIDTH 700
+#define HEIGHT 560
 
 namespace skiagm {
 
@@ -19,7 +19,7 @@ public:
         this->setBGColor(0xFF000000);
         fOnce = false;
     }
-    
+
 protected:
     virtual SkString onShortName() {
         return SkString("morphology");
@@ -28,7 +28,7 @@ protected:
     void make_bitmap() {
         fBitmap.setConfig(SkBitmap::kARGB_8888_Config, 135, 135);
         fBitmap.allocPixels();
-        SkDevice device(fBitmap);
+        SkBitmapDevice device(fBitmap);
         SkCanvas canvas(&device);
         canvas.clear(0x0);
         SkPaint paint;
@@ -44,46 +44,55 @@ protected:
     virtual SkISize onISize() {
         return make_isize(WIDTH, HEIGHT);
     }
+
+    void drawClippedBitmap(SkCanvas* canvas, const SkPaint& paint, int x, int y) {
+        canvas->save();
+        canvas->translate(SkIntToScalar(x), SkIntToScalar(y));
+        canvas->clipRect(SkRect::MakeWH(
+          SkIntToScalar(fBitmap.width()), SkIntToScalar(fBitmap.height())));
+        canvas->drawBitmap(fBitmap, 0, 0, &paint);
+        canvas->restore();
+    }
+
     virtual void onDraw(SkCanvas* canvas) {
         if (!fOnce) {
             make_bitmap();
             fOnce = true;
         }
         struct {
+            int fWidth, fHeight;
             int fRadiusX, fRadiusY;
-            bool erode;
-            SkScalar fX, fY;
         } samples[] = {
-            { 0, 0, false, 0,   0 },
-            { 0, 2, false, 140, 0 },
-            { 2, 0, false, 280, 0 },
-            { 2, 2, false, 420, 0 },
-            { 0, 0, true,  0,   140 },
-            { 0, 2, true,  140, 140 },
-            { 2, 0, true,  280, 140 },
-            { 2, 2, true,  420, 140 },
+            { 140, 140,   0,   0 },
+            { 140, 140,   0,   2 },
+            { 140, 140,   2,   0 },
+            { 140, 140,   2,   2 },
+            {  24,  24,  25,  25 },
         };
-        const char* str = "The quick brown fox jumped over the lazy dog.";
         SkPaint paint;
-        for (unsigned i = 0; i < SK_ARRAY_COUNT(samples); ++i) {
-            if (samples[i].erode) {
-                paint.setImageFilter(new SkErodeImageFilter(
-                    samples[i].fRadiusX,
-                    samples[i].fRadiusY))->unref();
-            } else {
-                paint.setImageFilter(new SkDilateImageFilter(
-                    samples[i].fRadiusX,
-                    samples[i].fRadiusY))->unref();
+        SkImageFilter::CropRect cropRect(SkRect::MakeXYWH(25, 20, 100, 80));
+
+        for (unsigned j = 0; j < 4; ++j) {
+            for (unsigned i = 0; i < SK_ARRAY_COUNT(samples); ++i) {
+                const SkImageFilter::CropRect* cr = j & 0x02 ? &cropRect : NULL;
+                if (j & 0x01) {
+                    paint.setImageFilter(new SkErodeImageFilter(
+                        samples[i].fRadiusX,
+                        samples[i].fRadiusY,
+                        NULL,
+                        cr))->unref();
+                } else {
+                    paint.setImageFilter(new SkDilateImageFilter(
+                        samples[i].fRadiusX,
+                        samples[i].fRadiusY,
+                        NULL,
+                        cr))->unref();
+                }
+                drawClippedBitmap(canvas, paint, i * 140, j * 140);
             }
-            SkRect bounds = SkRect::MakeXYWH(samples[i].fX,
-                                             samples[i].fY,
-                                             140, 140);
-            canvas->saveLayer(&bounds, &paint);
-            canvas->drawBitmap(fBitmap, samples[i].fX, samples[i].fY);
-            canvas->restore();
         }
     }
-    
+
 private:
     typedef GM INHERITED;
     SkBitmap fBitmap;

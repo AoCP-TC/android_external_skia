@@ -1,14 +1,15 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
+
+#include "Test.h"
+#include "TestClassDef.h"
 #include "SkMath.h"
 #include "SkPoint.h"
 #include "SkScalar.h"
-#include "Test.h"
 
 /*
    Duplicates lots of code from gpu/src/GrPathUtils.cpp
@@ -60,28 +61,28 @@ static inline uint32_t compute_pointCount(SkScalar d, SkScalar tol) {
     if (d < tol) {
        return 1;
     } else {
-       int temp = SkScalarCeil(SkScalarSqrt(SkScalarDiv(d, tol)));
-       uint32_t count = SkMinScalar(SkNextPow2(temp), MAX_POINTS_PER_CURVE);
+       int temp = SkScalarCeilToInt(SkScalarSqrt(SkScalarDiv(d, tol)));
+       uint32_t count = SkMin32(SkNextPow2(temp), MAX_POINTS_PER_CURVE);
        return count;
     }
 }
 
-uint32_t quadraticPointCount_EE(const SkPoint points[], SkScalar tol) {
+static uint32_t quadraticPointCount_EE(const SkPoint points[]) {
     int distance = estimate_distance(points);
     return estimate_pointCount(distance);
 }
 
-uint32_t quadraticPointCount_EC(const SkPoint points[], SkScalar tol) {
+static uint32_t quadraticPointCount_EC(const SkPoint points[], SkScalar tol) {
     int distance = estimate_distance(points);
     return compute_pointCount(SkIntToScalar(distance), tol);
 }
 
-uint32_t quadraticPointCount_CE(const SkPoint points[], SkScalar tol) {
+static uint32_t quadraticPointCount_CE(const SkPoint points[]) {
     SkScalar distance = compute_distance(points);
     return estimate_pointCount(SkScalarRound(distance));
 }
 
-uint32_t quadraticPointCount_CC(const SkPoint points[], SkScalar tol) {
+static uint32_t quadraticPointCount_CC(const SkPoint points[], SkScalar tol) {
     SkScalar distance = compute_distance(points);
     return compute_pointCount(distance, tol);
 }
@@ -122,7 +123,14 @@ static bool one_d_pe(const int* array, const unsigned int count,
         uint32_t computedCount =
             quadraticPointCount_CC(path, SkIntToScalar(1));
         uint32_t estimatedCount =
-            quadraticPointCount_EE(path, SkIntToScalar(1));
+            quadraticPointCount_EE(path);
+
+        if (false) { // avoid bit rot, suppress warning
+            computedCount =
+                    quadraticPointCount_EC(path, SkIntToScalar(1));
+            estimatedCount =
+                    quadraticPointCount_CE(path);
+        }
         // Allow estimated to be high by a factor of two, but no less than
         // the computed value.
         bool isAccurate = (estimatedCount >= computedCount) &&
@@ -153,10 +161,7 @@ static void TestQuadPointCount(skiatest::Reporter* reporter) {
     one_d_pe(gRibbon, SK_ARRAY_COUNT(gRibbon), reporter);
 }
 
-static void TestPathCoverage(skiatest::Reporter* reporter) {
+DEF_TEST(PathCoverage, reporter) {
     TestQuadPointCount(reporter);
 
 }
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("PathCoverage", PathCoverageTestClass, TestPathCoverage)

@@ -1,13 +1,12 @@
 {
-  'includes': [
-    'common.gypi',
-  ],
   'targets': [
     {
       'target_name': 'sfnt',
+      'product_name': 'skia_sfnt',
       'type': 'static_library',
+      'standalone_static_library': 1,
       'dependencies': [
-        'core.gyp:core',
+        'core.gyp:*',
       ],
       'include_dirs': [
         '../src/sfnt',
@@ -15,8 +14,13 @@
       'sources': [
         '../src/sfnt/SkIBMFamilyClass.h',
         '../src/sfnt/SkOTTableTypes.h',
+        '../src/sfnt/SkOTTable_glyf.h',
         '../src/sfnt/SkOTTable_head.h',
         '../src/sfnt/SkOTTable_hhea.h',
+        '../src/sfnt/SkOTTable_loca.h',
+        '../src/sfnt/SkOTTable_maxp.h',
+        '../src/sfnt/SkOTTable_maxp_CFF.h',
+        '../src/sfnt/SkOTTable_maxp_TT.h',
         '../src/sfnt/SkOTTable_name.h',
         '../src/sfnt/SkOTTable_OS_2.h',
         '../src/sfnt/SkOTTable_OS_2_V0.h',
@@ -30,8 +34,10 @@
         '../src/sfnt/SkOTUtils.h',
         '../src/sfnt/SkPreprocessorSeq.h',
         '../src/sfnt/SkSFNTHeader.h',
+        '../src/sfnt/SkTTCFHeader.h',
         '../src/sfnt/SkTypedEnum.h',
 
+        '../src/sfnt/SkOTTable_name.cpp',
         '../src/sfnt/SkOTUtils.cpp',
       ],
       'direct_dependent_settings': {
@@ -42,9 +48,3 @@
     },
   ],
 }
-
-# Local Variables:
-# tab-width:2
-# indent-tabs-mode:nil
-# End:
-# vim: set expandtab tabstop=2 shiftwidth=2:

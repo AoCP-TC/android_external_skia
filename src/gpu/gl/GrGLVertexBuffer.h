@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
@@ -6,12 +5,11 @@
  * found in the LICENSE file.
  */
 
-
-
 #ifndef GrGLVertexBuffer_DEFINED
 #define GrGLVertexBuffer_DEFINED
 
-#include "../GrVertexBuffer.h"
+#include "GrVertexBuffer.h"
+#include "GrGLBufferImpl.h"
 #include "gl/GrGLInterface.h"
 
 class GrGpuGL;
@@ -19,32 +17,39 @@ class GrGpuGL;
 class GrGLVertexBuffer : public GrVertexBuffer {
 
 public:
+    typedef GrGLBufferImpl::Desc Desc;
+
+    GrGLVertexBuffer(GrGpuGL* gpu, const Desc& desc);
     virtual ~GrGLVertexBuffer() { this->release(); }
+
+    GrGLuint bufferID() const { return fImpl.bufferID(); }
+    size_t baseOffset() const { return fImpl.baseOffset(); }
+
+    void bind() const {
+        if (this->isValid()) {
+            fImpl.bind(this->getGpuGL());
+        }
+    }
+
     // overrides of GrVertexBuffer
     virtual void* lock();
     virtual void* lockPtr() const;
     virtual void unlock();
     virtual bool isLocked() const;
     virtual bool updateData(const void* src, size_t srcSizeInBytes);
-    GrGLuint bufferID() const;
 
 protected:
-    GrGLVertexBuffer(GrGpuGL* gpu,
-                     GrGLuint id,
-                     size_t sizeInBytes,
-                     bool dynamic);
-
     // overrides of GrResource
-    virtual void onAbandon();
-    virtual void onRelease();
+    virtual void onAbandon() SK_OVERRIDE;
+    virtual void onRelease() SK_OVERRIDE;
 
 private:
-    void bind() const;
+    GrGpuGL* getGpuGL() const {
+        SkASSERT(this->isValid());
+        return (GrGpuGL*)(this->getGpu());
+    }
 
-    GrGLuint     fBufferID;
-    void*        fLockPtr;
-
-    friend class GrGpuGL;
+    GrGLBufferImpl fImpl;
 
     typedef GrVertexBuffer INHERITED;
 };

@@ -5,31 +5,31 @@
  * found in the LICENSE file.
  */
 
-
 #ifndef SkBlurImageFilter_DEFINED
 #define SkBlurImageFilter_DEFINED
 
 #include "SkImageFilter.h"
+#include "SkSize.h"
 
 class SK_API SkBlurImageFilter : public SkImageFilter {
 public:
-    SkBlurImageFilter(SkScalar sigmaX, SkScalar sigmaY);
+    SkBlurImageFilter(SkScalar sigmaX,
+                      SkScalar sigmaY,
+                      SkImageFilter* input = NULL,
+                      const CropRect* cropRect = NULL);
 
-    virtual bool asABlur(SkSize* sigma) const SK_OVERRIDE;
-
-    static SkFlattenable* CreateProc(SkFlattenableReadBuffer& buffer) {
-        return SkNEW_ARGS(SkBlurImageFilter, (buffer));
-    }
-
-    SK_DECLARE_FLATTENABLE_REGISTRAR()
+    SK_DECLARE_PUBLIC_FLATTENABLE_DESERIALIZATION_PROCS(SkBlurImageFilter)
 
 protected:
     explicit SkBlurImageFilter(SkFlattenableReadBuffer& buffer);
+    virtual void flatten(SkFlattenableWriteBuffer&) const SK_OVERRIDE;
 
     virtual bool onFilterImage(Proxy*, const SkBitmap& src, const SkMatrix&,
                                SkBitmap* result, SkIPoint* offset) SK_OVERRIDE;
-    virtual void flatten(SkFlattenableWriteBuffer& buffer) SK_OVERRIDE;
-    virtual Factory getFactory() SK_OVERRIDE { return CreateProc; }
+
+    bool canFilterImageGPU() const SK_OVERRIDE { return true; }
+    virtual bool filterImageGPU(Proxy* proxy, const SkBitmap& src, const SkMatrix& ctm,
+                                SkBitmap* result, SkIPoint* offset) SK_OVERRIDE;
 
 private:
     SkSize   fSigma;
@@ -37,4 +37,3 @@ private:
 };
 
 #endif
-

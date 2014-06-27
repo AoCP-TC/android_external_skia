@@ -1,11 +1,12 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
+
 #include "Test.h"
+#include "TestClassDef.h"
 #include "SkShader.h"
 #include "SkGradientShader.h"
 #include "SkColorShader.h"
@@ -13,9 +14,9 @@
 static void test_bitmap(skiatest::Reporter* reporter) {
     SkBitmap bmp;
     bmp.setConfig(SkBitmap::kARGB_8888_Config, 2, 2);
-    
+
     // test 1: bitmap without pixel data
-    SkShader* shader = SkShader::CreateBitmapShader(bmp, 
+    SkShader* shader = SkShader::CreateBitmapShader(bmp,
         SkShader::kClamp_TileMode, SkShader::kClamp_TileMode);
     REPORTER_ASSERT(reporter, shader);
     REPORTER_ASSERT(reporter, !shader->isOpaque());
@@ -25,23 +26,23 @@ static void test_bitmap(skiatest::Reporter* reporter) {
     bmp.allocPixels();
 
     // test 2: not opaque by default
-    shader = SkShader::CreateBitmapShader(bmp, 
+    shader = SkShader::CreateBitmapShader(bmp,
         SkShader::kClamp_TileMode, SkShader::kClamp_TileMode);
     REPORTER_ASSERT(reporter, shader);
     REPORTER_ASSERT(reporter, !shader->isOpaque());
     shader->unref();
 
     // test 3: explicitly opaque
-    bmp.setIsOpaque(true);
-    shader = SkShader::CreateBitmapShader(bmp, 
+    bmp.setAlphaType(kOpaque_SkAlphaType);
+    shader = SkShader::CreateBitmapShader(bmp,
         SkShader::kClamp_TileMode, SkShader::kClamp_TileMode);
     REPORTER_ASSERT(reporter, shader);
     REPORTER_ASSERT(reporter, shader->isOpaque());
     shader->unref();
 
     // test 4: explicitly not opaque
-    bmp.setIsOpaque(false);
-    shader = SkShader::CreateBitmapShader(bmp, 
+    bmp.setAlphaType(kPremul_SkAlphaType);
+    shader = SkShader::CreateBitmapShader(bmp,
         SkShader::kClamp_TileMode, SkShader::kClamp_TileMode);
     REPORTER_ASSERT(reporter, shader);
     REPORTER_ASSERT(reporter, !shader->isOpaque());
@@ -102,18 +103,14 @@ static void test_color(skiatest::Reporter* reporter)
     SkColorShader colorShader3(SkColorSetARGB(0x7F,0,0,0));
     REPORTER_ASSERT(reporter, !colorShader3.isOpaque());
 
-    // with inherrited color, shader must declare itself as opaque, 
+    // with inherrited color, shader must declare itself as opaque,
     // since lack of opacity will depend solely on the paint
     SkColorShader colorShader4;
     REPORTER_ASSERT(reporter, colorShader4.isOpaque());
 }
 
-static void test_shader_opacity(skiatest::Reporter* reporter)
-{
+DEF_TEST(ShaderOpacity, reporter) {
     test_gradient(reporter);
     test_color(reporter);
     test_bitmap(reporter);
 }
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("ShaderOpacity", ShaderOpacityTestClass, test_shader_opacity)

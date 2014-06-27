@@ -10,11 +10,22 @@
 #include "GrResource.h"
 #include "GrGpu.h"
 
-GrResource::GrResource(GrGpu* gpu) {
-    fGpu        = gpu;
-    fNext       = NULL;
-    fPrevious   = NULL;
+GrResource::GrResource(GrGpu* gpu, bool isWrapped) {
+    fGpu              = gpu;
+    fCacheEntry       = NULL;
+    fDeferredRefCount = 0;
+    if (isWrapped) {
+        fFlags = kWrapped_FlagBit;
+    } else {
+        fFlags = 0;
+    }
     fGpu->insertResource(this);
+}
+
+GrResource::~GrResource() {
+    // subclass should have released this.
+    SkASSERT(0 == fDeferredRefCount);
+    SkASSERT(!this->isValid());
 }
 
 void GrResource::release() {
@@ -48,4 +59,3 @@ GrContext* GrResource::getContext() {
         return NULL;
     }
 }
-

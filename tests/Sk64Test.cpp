@@ -1,11 +1,12 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
+
 #include "Test.h"
+#include "TestClassDef.h"
 #include "SkRandom.h"
 #include <math.h>
 
@@ -31,7 +32,7 @@ static void bool_table_test(skiatest::Reporter* reporter,
     }
 #endif
 
-static void TestSk64(skiatest::Reporter* reporter) {
+DEF_TEST(Sk64Test, reporter) {
     enum BoolTests {
         kZero_BoolTest,
         kPos_BoolTest,
@@ -167,7 +168,6 @@ static void TestSk64(skiatest::Reporter* reporter) {
 
         REPORTER_ASSERT(reporter, check == w);
 
-#ifdef SK_CAN_USE_FLOAT
         wide.setMul(rand.nextS(), rand.nextS());
         wide.abs();
         denom = wide.getSqrt();
@@ -196,10 +196,6 @@ static void TestSk64(skiatest::Reporter* reporter) {
                      i, dnumer, ddenom, ddiv, dfixdiv, fixdiv);
         }
         REPORTER_ASSERT(reporter, SkAbs32(diff) <= 1);
-#endif
     }
 #endif
 }
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("Sk64", Sk64TestClass, TestSk64)

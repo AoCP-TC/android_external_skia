@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
@@ -7,18 +6,22 @@
  */
 
 #include "Test.h"
+#include "SkBitmapDevice.h"
 #include "SkCanvas.h"
+#include "SkColorPriv.h"
+#include "SkMathPriv.h"
 #include "SkRegion.h"
+#if SK_SUPPORT_GPU
 #include "SkGpuDevice.h"
-
+#include "GrContextFactory.h"
+#endif
 
 static const int DEV_W = 100, DEV_H = 100;
 static const SkIRect DEV_RECT = SkIRect::MakeWH(DEV_W, DEV_H);
-static const SkRect DEV_RECT_S = SkRect::MakeWH(DEV_W * SK_Scalar1, 
+static const SkRect DEV_RECT_S = SkRect::MakeWH(DEV_W * SK_Scalar1,
                                                 DEV_H * SK_Scalar1);
 
-namespace {
-SkPMColor getCanvasColor(int x, int y) {
+static SkPMColor getCanvasColor(int x, int y) {
     SkASSERT(x >= 0 && x < DEV_W);
     SkASSERT(y >= 0 && y < DEV_H);
 
@@ -46,8 +49,8 @@ SkPMColor getCanvasColor(int x, int y) {
     }
     return SkPremultiplyARGBInline(a, r, g, b);
 }
-    
-SkPMColor getBitmapColor(int x, int y, int w, int h) {
+
+static SkPMColor getBitmapColor(int x, int y, int w) {
     int n = y * w + x;
 
     U8CPU b = n & 0xff;
@@ -56,9 +59,9 @@ SkPMColor getBitmapColor(int x, int y, int w, int h) {
     return SkPackARGB32(0xff, r, g , b);
 }
 
-SkPMColor convertConfig8888ToPMColor(SkCanvas::Config8888 config8888,
-                                     uint32_t color,
-                                     bool* premul) {
+static SkPMColor convertConfig8888ToPMColor(SkCanvas::Config8888 config8888,
+                                            uint32_t color,
+                                            bool* premul) {
     const uint8_t* c = reinterpret_cast<uint8_t*>(&color);
     U8CPU a,r,g,b;
     *premul = false;
@@ -88,6 +91,9 @@ SkPMColor convertConfig8888ToPMColor(SkCanvas::Config8888 config8888,
             g = static_cast<U8CPU>(c[1]);
             b = static_cast<U8CPU>(c[2]);
             break;
+        default:
+            SkDEBUGFAIL("Unexpected Config8888");
+            return 0;
     }
     if (*premul) {
         r = SkMulDiv255Ceiling(r, a);
@@ -97,11 +103,11 @@ SkPMColor convertConfig8888ToPMColor(SkCanvas::Config8888 config8888,
     return SkPackARGB32(a, r, g, b);
 }
 
-void fillCanvas(SkCanvas* canvas) {
+static void fillCanvas(SkCanvas* canvas) {
     static SkBitmap bmp;
     if (bmp.isNull()) {
         bmp.setConfig(SkBitmap::kARGB_8888_Config, DEV_W, DEV_H);
-        bool alloc = bmp.allocPixels();
+        SkDEBUGCODE(bool alloc =) bmp.allocPixels();
         SkASSERT(alloc);
         SkAutoLockPixels alp(bmp);
         intptr_t pixels = reinterpret_cast<intptr_t>(bmp.getPixels());
@@ -120,8 +126,8 @@ void fillCanvas(SkCanvas* canvas) {
     canvas->drawBitmap(bmp, 0, 0, &paint);
     canvas->restore();
 }
-    
-void fillBitmap(SkBitmap* bitmap) {
+
+static void fillBitmap(SkBitmap* bitmap) {
     SkASSERT(bitmap->lockPixelsAreWritable());
     SkAutoLockPixels alp(*bitmap);
     int w = bitmap->width();
@@ -130,12 +136,12 @@ void fillBitmap(SkBitmap* bitmap) {
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             SkPMColor* pixel = reinterpret_cast<SkPMColor*>(pixels + y * bitmap->rowBytes() + x * bitmap->bytesPerPixel());
-            *pixel = getBitmapColor(x, y, w, h);
+            *pixel = getBitmapColor(x, y, w);
         }
     }
 }
 
-bool checkPixel(SkPMColor a, SkPMColor b, bool didPremulConversion) {
+static bool checkPixel(SkPMColor a, SkPMColor b, bool didPremulConversion) {
     if (!didPremulConversion) {
         return a == b;
     }
@@ -158,16 +164,16 @@ bool checkPixel(SkPMColor a, SkPMColor b, bool didPremulConversion) {
 // checks the bitmap contains correct pixels after the readPixels
 // if the bitmap was prefilled with pixels it checks that these weren't
 // overwritten in the area outside the readPixels.
-bool checkRead(skiatest::Reporter* reporter,
-               const SkBitmap& bitmap,
-               int x, int y,
-               bool checkCanvasPixels,
-               bool checkBitmapPixels,
-               SkCanvas::Config8888 config8888) {
+static bool checkRead(skiatest::Reporter* reporter,
+                      const SkBitmap& bitmap,
+                      int x, int y,
+                      bool checkCanvasPixels,
+                      bool checkBitmapPixels,
+                      SkCanvas::Config8888 config8888) {
     SkASSERT(SkBitmap::kARGB_8888_Config == bitmap.config());
     SkASSERT(!bitmap.isNull());
     SkASSERT(checkCanvasPixels || checkBitmapPixels);
-    
+
     int bw = bitmap.width();
     int bh = bitmap.height();
 
@@ -176,14 +182,13 @@ bool checkRead(skiatest::Reporter* reporter,
     if (!clippedSrcRect.intersect(srcRect)) {
         clippedSrcRect.setEmpty();
     }
-    bool failed = false;
     SkAutoLockPixels alp(bitmap);
     intptr_t pixels = reinterpret_cast<intptr_t>(bitmap.getPixels());
     for (int by = 0; by < bh; ++by) {
         for (int bx = 0; bx < bw; ++bx) {
             int devx = bx + srcRect.fLeft;
             int devy = by + srcRect.fTop;
-            
+
             uint32_t pixel = *reinterpret_cast<SkPMColor*>(pixels + by * bitmap.rowBytes() + bx * bitmap.bytesPerPixel());
 
             if (clippedSrcRect.contains(devx, devy)) {
@@ -194,37 +199,36 @@ bool checkRead(skiatest::Reporter* reporter,
                     bool check;
                     REPORTER_ASSERT(reporter, check = checkPixel(pmPixel, canvasPixel, didPremul));
                     if (!check) {
-                        failed = true;
+                        return false;
                     }
                 }
             } else if (checkBitmapPixels) {
-                REPORTER_ASSERT(reporter, getBitmapColor(bx, by, bw, bh) == pixel);
-                if (getBitmapColor(bx, by, bw, bh) != pixel) {
-                    failed = true;
+                REPORTER_ASSERT(reporter, getBitmapColor(bx, by, bw) == pixel);
+                if (getBitmapColor(bx, by, bw) != pixel) {
+                    return false;
                 }
             }
         }
     }
-    return !failed;
+    return true;
 }
 
 enum BitmapInit {
     kFirstBitmapInit = 0,
-    
+
     kNoPixels_BitmapInit = kFirstBitmapInit,
     kTight_BitmapInit,
     kRowBytes_BitmapInit,
-    
+
     kBitmapInitCnt
 };
 
-BitmapInit nextBMI(BitmapInit bmi) {
+static BitmapInit nextBMI(BitmapInit bmi) {
     int x = bmi;
     return static_cast<BitmapInit>(++x);
 }
 
-
-void init_bitmap(SkBitmap* bitmap, const SkIRect& rect, BitmapInit init) {
+static void init_bitmap(SkBitmap* bitmap, const SkIRect& rect, BitmapInit init) {
     int w = rect.width();
     int h = rect.height();
     int rowBytes = 0;
@@ -247,9 +251,7 @@ void init_bitmap(SkBitmap* bitmap, const SkIRect& rect, BitmapInit init) {
     }
 }
 
-void ReadPixelsTest(skiatest::Reporter* reporter, GrContext* context) {
-    SkCanvas canvas;
-    
+static void ReadPixelsTest(skiatest::Reporter* reporter, GrContextFactory* factory) {
     const SkIRect testRects[] = {
         // entire thing
         DEV_RECT,
@@ -297,95 +299,113 @@ void ReadPixelsTest(skiatest::Reporter* reporter, GrContext* context) {
         SkIRect::MakeLTRB(3 * DEV_W / 4, -10, DEV_W + 10, DEV_H + 10),
     };
 
-    for (int dtype = 0; dtype < 2; ++dtype) {
-
-        if (0 == dtype) {
-            canvas.setDevice(new SkDevice(SkBitmap::kARGB_8888_Config,
-                                          DEV_W,
-                                          DEV_H,
-                                          false))->unref();
-        } else {
-#if SK_SCALAR_IS_FIXED
-            // GPU device known not to work in the fixed pt build.
-            continue;
-#endif
-            canvas.setDevice(new SkGpuDevice(context,
-                                             SkBitmap::kARGB_8888_Config,
-                                             DEV_W,
-                                             DEV_H))->unref();
+    for (int dtype = 0; dtype < 3; ++dtype) {
+        int glCtxTypeCnt = 1;
+#if SK_SUPPORT_GPU
+        if (0 != dtype)  {
+            glCtxTypeCnt = GrContextFactory::kGLContextTypeCnt;
         }
-        fillCanvas(&canvas);
-
-        static const SkCanvas::Config8888 gReadConfigs[] = {
-            SkCanvas::kNative_Premul_Config8888,
-            SkCanvas::kNative_Unpremul_Config8888,
-/**
- * There is a bug in Ganesh (http://code.google.com/p/skia/issues/detail?id=438)
- * that causes the readback of pixels from BGRA canvas to an RGBA bitmap to
- * fail. This should be removed as soon as the issue above is resolved.
- */
-#if !defined(SK_BUILD_FOR_ANDROID)
-            SkCanvas::kBGRA_Premul_Config8888,
-            SkCanvas::kBGRA_Unpremul_Config8888,
 #endif
-            SkCanvas::kRGBA_Premul_Config8888,
-            SkCanvas::kRGBA_Unpremul_Config8888,
-        };
-        for (size_t rect = 0; rect < SK_ARRAY_COUNT(testRects); ++rect) {
-            const SkIRect& srcRect = testRects[rect];
-            for (BitmapInit bmi = kFirstBitmapInit;
-                 bmi < kBitmapInitCnt;
-                 bmi = nextBMI(bmi)) {
-                for (size_t c = 0; c < SK_ARRAY_COUNT(gReadConfigs); ++c) {
-                    SkCanvas::Config8888 config8888 = gReadConfigs[c];
-                    SkBitmap bmp;
-                    init_bitmap(&bmp, srcRect, bmi);
-
-                    // if the bitmap has pixels allocated before the readPixels,
-                    // note that and fill them with pattern
-                    bool startsWithPixels = !bmp.isNull();
-                    if (startsWithPixels) {
-                        fillBitmap(&bmp);
-                    }
-
-                    bool success =
-                        canvas.readPixels(&bmp, srcRect.fLeft,
-                                          srcRect.fTop, config8888);
-
-                    // we expect to succeed when the read isn't fully clipped
-                    // out.
-                    bool expectSuccess = SkIRect::Intersects(srcRect, DEV_RECT);
-                    // determine whether we expected the read to succeed.
-                    REPORTER_ASSERT(reporter, success == expectSuccess);
-
-                    if (success || startsWithPixels) {
-                        checkRead(reporter, bmp, srcRect.fLeft, srcRect.fTop,
-                                  success, startsWithPixels, config8888);
-                    } else {
-                        // if we had no pixels beforehand and the readPixels
-                        // failed then our bitmap should still not have pixels
-                        REPORTER_ASSERT(reporter, bmp.isNull());
-                    }
+        for (int glCtxType = 0; glCtxType < glCtxTypeCnt; ++glCtxType) {
+            SkAutoTUnref<SkBaseDevice> device;
+            if (0 == dtype) {
+                device.reset(new SkBitmapDevice(SkBitmap::kARGB_8888_Config,
+                                                DEV_W, DEV_H, false));
+            } else {
+#if SK_SUPPORT_GPU
+                GrContextFactory::GLContextType type =
+                    static_cast<GrContextFactory::GLContextType>(glCtxType);
+                if (!GrContextFactory::IsRenderingGLContext(type)) {
+                    continue;
                 }
-                // check the old webkit version of readPixels that clips the
-                // bitmap size
-                SkBitmap wkbmp;
-                bool success = canvas.readPixels(srcRect, &wkbmp);
-                SkIRect clippedRect = DEV_RECT;
-                if (clippedRect.intersect(srcRect)) {
-                    REPORTER_ASSERT(reporter, success);
-                    checkRead(reporter, wkbmp, clippedRect.fLeft,
-                              clippedRect.fTop, true, false,
-                              SkCanvas::kNative_Premul_Config8888);
-                } else {
-                    REPORTER_ASSERT(reporter, !success);
+                GrContext* context = factory->get(type);
+                if (NULL == context) {
+                    continue;
+                }
+                GrTextureDesc desc;
+                desc.fFlags = kRenderTarget_GrTextureFlagBit | kNoStencil_GrTextureFlagBit;
+                desc.fWidth = DEV_W;
+                desc.fHeight = DEV_H;
+                desc.fConfig = kSkia8888_GrPixelConfig;
+                desc.fOrigin = 1 == dtype ? kBottomLeft_GrSurfaceOrigin
+                                          : kTopLeft_GrSurfaceOrigin;
+                GrAutoScratchTexture ast(context, desc, GrContext::kExact_ScratchTexMatch);
+                SkAutoTUnref<GrTexture> tex(ast.detach());
+                device.reset(new SkGpuDevice(context, tex));
+#else
+                continue;
+#endif
+            }
+            SkCanvas canvas(device);
+            fillCanvas(&canvas);
+
+            static const SkCanvas::Config8888 gReadConfigs[] = {
+                SkCanvas::kNative_Premul_Config8888,
+                SkCanvas::kNative_Unpremul_Config8888,
+
+                SkCanvas::kBGRA_Premul_Config8888,
+                SkCanvas::kBGRA_Unpremul_Config8888,
+
+                SkCanvas::kRGBA_Premul_Config8888,
+                SkCanvas::kRGBA_Unpremul_Config8888,
+            };
+            for (size_t rect = 0; rect < SK_ARRAY_COUNT(testRects); ++rect) {
+                const SkIRect& srcRect = testRects[rect];
+                for (BitmapInit bmi = kFirstBitmapInit;
+                     bmi < kBitmapInitCnt;
+                     bmi = nextBMI(bmi)) {
+                    for (size_t c = 0; c < SK_ARRAY_COUNT(gReadConfigs); ++c) {
+                        SkCanvas::Config8888 config8888 = gReadConfigs[c];
+                        SkBitmap bmp;
+                        init_bitmap(&bmp, srcRect, bmi);
+
+                        // if the bitmap has pixels allocated before the readPixels,
+                        // note that and fill them with pattern
+                        bool startsWithPixels = !bmp.isNull();
+                        if (startsWithPixels) {
+                            fillBitmap(&bmp);
+                        }
+                        uint32_t idBefore = canvas.getDevice()->accessBitmap(false).getGenerationID();
+                        bool success =
+                            canvas.readPixels(&bmp, srcRect.fLeft,
+                                              srcRect.fTop, config8888);
+                        uint32_t idAfter = canvas.getDevice()->accessBitmap(false).getGenerationID();
+
+                        // we expect to succeed when the read isn't fully clipped
+                        // out.
+                        bool expectSuccess = SkIRect::Intersects(srcRect, DEV_RECT);
+                        // determine whether we expected the read to succeed.
+                        REPORTER_ASSERT(reporter, success == expectSuccess);
+                        // read pixels should never change the gen id
+                        REPORTER_ASSERT(reporter, idBefore == idAfter);
+
+                        if (success || startsWithPixels) {
+                            checkRead(reporter, bmp, srcRect.fLeft, srcRect.fTop,
+                                      success, startsWithPixels, config8888);
+                        } else {
+                            // if we had no pixels beforehand and the readPixels
+                            // failed then our bitmap should still not have pixels
+                            REPORTER_ASSERT(reporter, bmp.isNull());
+                        }
+                    }
+                    // check the old webkit version of readPixels that clips the
+                    // bitmap size
+                    SkBitmap wkbmp;
+                    bool success = canvas.readPixels(srcRect, &wkbmp);
+                    SkIRect clippedRect = DEV_RECT;
+                    if (clippedRect.intersect(srcRect)) {
+                        REPORTER_ASSERT(reporter, success);
+                        checkRead(reporter, wkbmp, clippedRect.fLeft,
+                                  clippedRect.fTop, true, false,
+                                  SkCanvas::kNative_Premul_Config8888);
+                    } else {
+                        REPORTER_ASSERT(reporter, !success);
+                    }
                 }
             }
         }
     }
 }
-}
 
 #include "TestClassDef.h"
 DEFINE_GPUTESTCLASS("ReadPixels", ReadPixelsTestClass, ReadPixelsTest)
-

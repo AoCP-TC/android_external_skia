@@ -1,20 +1,21 @@
+#Animator is basically Skia's (much saner) version of Flash.
+#On top of Views it provides a declarative UI model which can be updated
+#based on events which trigger changes or scripts.
+
 {
-  'includes': [
-    'common.gypi',
-  ],
   'targets': [
     {
       'target_name': 'animator',
+      'product_name': 'skia_animator',
       'type': 'static_library',
+      'standalone_static_library': 1,
+      'dependencies': [
+        'skia_lib.gyp:skia_lib',
+        'views.gyp:*',
+        'xml.gyp:*',
+      ],
       'include_dirs': [
-        '../include/config',
-        '../include/core',
-        '../include/effects',
         '../include/animator',
-        '../include/views',
-        '../include/xml',
-        '../include/utils',
-        '../include/images',
         '../src/utils',
       ],
       'sources': [
@@ -184,9 +185,3 @@
     },
   ],
 }
-
-# Local Variables:
-# tab-width:2
-# indent-tabs-mode:nil
-# End:
-# vim: set expandtab tabstop=2 shiftwidth=2:

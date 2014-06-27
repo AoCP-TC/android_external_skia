@@ -9,67 +9,163 @@
 
 #include "GrContext.h"
 
+#include "effects/GrSingleTextureEffect.h"
+#include "effects/GrConfigConversionEffect.h"
+
+#include "GrAARectRenderer.h"
 #include "GrBufferAllocPool.h"
-#include "GrClipIterator.h"
 #include "GrGpu.h"
+#include "GrDrawTargetCaps.h"
 #include "GrIndexBuffer.h"
 #include "GrInOrderDrawBuffer.h"
+#include "GrOvalRenderer.h"
 #include "GrPathRenderer.h"
 #include "GrPathUtils.h"
 #include "GrResourceCache.h"
+#include "GrSoftwarePathRenderer.h"
 #include "GrStencilBuffer.h"
 #include "GrTextStrike.h"
+#include "SkRTConf.h"
+#include "SkRRect.h"
+#include "SkStrokeRec.h"
 #include "SkTLazy.h"
+#include "SkTLS.h"
 #include "SkTrace.h"
 
-#define DEFER_TEXT_RENDERING 1
+// It can be useful to set this to false to test whether a bug is caused by using the
+// InOrderDrawBuffer, to compare performance of using/not using InOrderDrawBuffer, or to make
+// debugging simpler.
+SK_CONF_DECLARE(bool, c_Defer, "gpu.deferContext", true,
+                "Defers rendering in GrContext via GrInOrderDrawBuffer.");
 
-#define BATCH_RECT_TO_RECT (1 && !GR_STATIC_RECT_VB)
+#define BUFFERED_DRAW (c_Defer ? kYes_BufferedDraw : kNo_BufferedDraw)
 
-// When we're using coverage AA but the blend is incompatible (given gpu
-// limitations) should we disable AA or draw wrong?
-#define DISABLE_COVERAGE_AA_FOR_BLEND 1
+#ifdef SK_DEBUG
+    // change this to a 1 to see notifications when partial coverage fails
+    #define GR_DEBUG_PARTIAL_COVERAGE_CHECK 0
+#else
+    #define GR_DEBUG_PARTIAL_COVERAGE_CHECK 0
+#endif
 
-static const size_t MAX_TEXTURE_CACHE_COUNT = 256;
-static const size_t MAX_TEXTURE_CACHE_BYTES = 16 * 1024 * 1024;
+static const size_t MAX_RESOURCE_CACHE_COUNT = GR_DEFAULT_RESOURCE_CACHE_COUNT_LIMIT;
+static const size_t MAX_RESOURCE_CACHE_BYTES = GR_DEFAULT_RESOURCE_CACHE_MB_LIMIT * 1024 * 1024;
 
-static const size_t DRAW_BUFFER_VBPOOL_BUFFER_SIZE = 1 << 18;
+static const size_t DRAW_BUFFER_VBPOOL_BUFFER_SIZE = 1 << 15;
 static const int DRAW_BUFFER_VBPOOL_PREALLOC_BUFFERS = 4;
 
-// We are currently only batching Text and drawRectToRect, both
-// of which use the quad index buffer.
-static const size_t DRAW_BUFFER_IBPOOL_BUFFER_SIZE = 0;
-static const int DRAW_BUFFER_IBPOOL_PREALLOC_BUFFERS = 0;
+static const size_t DRAW_BUFFER_IBPOOL_BUFFER_SIZE = 1 << 11;
+static const int DRAW_BUFFER_IBPOOL_PREALLOC_BUFFERS = 4;
 
-#define ASSERT_OWNED_RESOURCE(R) GrAssert(!(R) || (R)->getContext() == this)
+#define ASSERT_OWNED_RESOURCE(R) SkASSERT(!(R) || (R)->getContext() == this)
 
-GrContext* GrContext::Create(GrEngine engine,
-                             GrPlatform3DContext context3D) {
-    GrContext* ctx = NULL;
-    GrGpu* fGpu = GrGpu::Create(engine, context3D);
-    if (NULL != fGpu) {
-        ctx = new GrContext(fGpu);
-        fGpu->unref();
+// Glorified typedef to avoid including GrDrawState.h in GrContext.h
+class GrContext::AutoRestoreEffects : public GrDrawState::AutoRestoreEffects {};
+
+class GrContext::AutoCheckFlush {
+public:
+    AutoCheckFlush(GrContext* context) : fContext(context) { SkASSERT(NULL != context); }
+
+    ~AutoCheckFlush() {
+        if (fContext->fFlushToReduceCacheSize) {
+            fContext->flush();
+        }
     }
-    return ctx;
+
+private:
+    GrContext* fContext;
+};
+
+GrContext* GrContext::Create(GrBackend backend, GrBackendContext backendContext) {
+    GrContext* context = SkNEW(GrContext);
+    if (context->init(backend, backendContext)) {
+        return context;
+    } else {
+        context->unref();
+        return NULL;
+    }
+}
+
+GrContext::GrContext() {
+    fDrawState = NULL;
+    fGpu = NULL;
+    fClip = NULL;
+    fPathRendererChain = NULL;
+    fSoftwarePathRenderer = NULL;
+    fTextureCache = NULL;
+    fFontCache = NULL;
+    fDrawBuffer = NULL;
+    fDrawBufferVBAllocPool = NULL;
+    fDrawBufferIBAllocPool = NULL;
+    fFlushToReduceCacheSize = false;
+    fAARectRenderer = NULL;
+    fOvalRenderer = NULL;
+    fViewMatrix.reset();
+    fMaxTextureSizeOverride = 1 << 20;
+}
+
+bool GrContext::init(GrBackend backend, GrBackendContext backendContext) {
+    SkASSERT(NULL == fGpu);
+
+    fGpu = GrGpu::Create(backend, backendContext, this);
+    if (NULL == fGpu) {
+        return false;
+    }
+
+    fDrawState = SkNEW(GrDrawState);
+    fGpu->setDrawState(fDrawState);
+
+    fTextureCache = SkNEW_ARGS(GrResourceCache,
+                               (MAX_RESOURCE_CACHE_COUNT,
+                                MAX_RESOURCE_CACHE_BYTES));
+    fTextureCache->setOverbudgetCallback(OverbudgetCB, this);
+
+    fFontCache = SkNEW_ARGS(GrFontCache, (fGpu));
+
+    fLastDrawWasBuffered = kNo_BufferedDraw;
+
+    fAARectRenderer = SkNEW(GrAARectRenderer);
+    fOvalRenderer = SkNEW(GrOvalRenderer);
+
+    fDidTestPMConversions = false;
+
+    this->setupDrawBuffer();
+
+    return true;
 }
 
 GrContext::~GrContext() {
+    if (NULL == fGpu) {
+        return;
+    }
+
     this->flush();
+
+    for (int i = 0; i < fCleanUpData.count(); ++i) {
+        (*fCleanUpData[i].fFunc)(this, fCleanUpData[i].fInfo);
+    }
+
+    // Since the gpu can hold scratch textures, give it a chance to let go
+    // of them before freeing the texture cache
+    fGpu->purgeResources();
+
     delete fTextureCache;
+    fTextureCache = NULL;
     delete fFontCache;
     delete fDrawBuffer;
     delete fDrawBufferVBAllocPool;
     delete fDrawBufferIBAllocPool;
 
-    GrSafeUnref(fAAFillRectIndexBuffer);
-    GrSafeUnref(fAAStrokeRectIndexBuffer);
+    fAARectRenderer->unref();
+    fOvalRenderer->unref();
+
     fGpu->unref();
-    GrSafeUnref(fPathRendererChain);
+    SkSafeUnref(fPathRendererChain);
+    SkSafeUnref(fSoftwarePathRenderer);
+    fDrawState->unref();
 }
 
 void GrContext::contextLost() {
-    contextDestroyed();
+    this->contextDestroyed();
     this->setupDrawBuffer();
 }
 
@@ -80,7 +176,8 @@ void GrContext::contextDestroyed() {
 
     // a path renderer may be holding onto resources that
     // are now unusable
-    GrSafeSetNull(fPathRendererChain);
+    SkSafeSetNull(fPathRendererChain);
+    SkSafeSetNull(fSoftwarePathRenderer);
 
     delete fDrawBuffer;
     fDrawBuffer = NULL;
@@ -91,24 +188,32 @@ void GrContext::contextDestroyed() {
     delete fDrawBufferIBAllocPool;
     fDrawBufferIBAllocPool = NULL;
 
-    GrSafeSetNull(fAAFillRectIndexBuffer);
-    GrSafeSetNull(fAAStrokeRectIndexBuffer);
+    fAARectRenderer->reset();
+    fOvalRenderer->reset();
 
-    fTextureCache->removeAll();
+    fTextureCache->purgeAllUnlocked();
+
     fFontCache->freeAll();
     fGpu->markContextDirty();
 }
 
-void GrContext::resetContext() {
-    fGpu->markContextDirty();
+void GrContext::resetContext(uint32_t state) {
+    fGpu->markContextDirty(state);
 }
 
 void GrContext::freeGpuResources() {
     this->flush();
-    fTextureCache->removeAll();
+
+    fGpu->purgeResources();
+
+    fAARectRenderer->reset();
+    fOvalRenderer->reset();
+
+    fTextureCache->purgeAllUnlocked();
     fFontCache->freeAll();
     // a path renderer may be holding onto resources
-    GrSafeSetNull(fPathRendererChain);
+    SkSafeSetNull(fPathRendererChain);
+    SkSafeSetNull(fSoftwarePathRenderer);
 }
 
 size_t GrContext::getGpuTextureCacheBytes() const {
@@ -117,157 +222,38 @@ size_t GrContext::getGpuTextureCacheBytes() const {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-int GrContext::PaintStageVertexLayoutBits(
-                            const GrPaint& paint,
-                            const bool hasTexCoords[GrPaint::kTotalStages]) {
-    int stageMask = paint.getActiveStageMask();
-    int layout = 0;
-    for (int i = 0; i < GrPaint::kTotalStages; ++i) {
-        if ((1 << i) & stageMask) {
-            if (NULL != hasTexCoords && hasTexCoords[i]) {
-                layout |= GrDrawTarget::StageTexCoordVertexLayoutBit(i, i);
-            } else {
-                layout |= GrDrawTarget::StagePosAsTexCoordVertexLayoutBit(i);
-            }
-        }
-    }
-    return layout;
+GrTexture* GrContext::findAndRefTexture(const GrTextureDesc& desc,
+                                        const GrCacheID& cacheID,
+                                        const GrTextureParams* params) {
+    GrResourceKey resourceKey = GrTexture::ComputeKey(fGpu, params, desc, cacheID);
+    GrResource* resource = fTextureCache->find(resourceKey);
+    SkSafeRef(resource);
+    return static_cast<GrTexture*>(resource);
 }
 
-
-////////////////////////////////////////////////////////////////////////////////
-
-enum {
-    // flags for textures
-    kNPOTBit            = 0x1,
-    kFilterBit          = 0x2,
-    kScratchBit         = 0x4,
-
-    // resource type
-    kTextureBit         = 0x8,
-    kStencilBufferBit   = 0x10
-};
-
-GrTexture* GrContext::TextureCacheEntry::texture() const {
-    if (NULL == fEntry) {
-        return NULL; 
-    } else {
-        return (GrTexture*) fEntry->resource();
-    }
-}
-
-namespace {
-// returns true if this is a "special" texture because of gpu NPOT limitations
-bool gen_texture_key_values(const GrGpu* gpu,
-                            const GrSamplerState* sampler,
-                            GrContext::TextureKey clientKey,
-                            int width,
-                            int height,
-                            int sampleCnt,
-                            bool scratch,
-                            uint32_t v[4]) {
-    GR_STATIC_ASSERT(sizeof(GrContext::TextureKey) == sizeof(uint64_t));
-    // we assume we only need 16 bits of width and height
-    // assert that texture creation will fail anyway if this assumption
-    // would cause key collisions.
-    GrAssert(gpu->getCaps().fMaxTextureSize <= SK_MaxU16);
-    v[0] = clientKey & 0xffffffffUL;
-    v[1] = (clientKey >> 32) & 0xffffffffUL;
-    v[2] = width | (height << 16);
-
-    v[3] = (sampleCnt << 24);
-    GrAssert(sampleCnt >= 0 && sampleCnt < 256);
-
-    if (!gpu->getCaps().fNPOTTextureTileSupport) {
-        bool isPow2 = GrIsPow2(width) && GrIsPow2(height);
-
-        bool tiled = NULL != sampler &&
-                     ((sampler->getWrapX() != GrSamplerState::kClamp_WrapMode) ||
-                      (sampler->getWrapY() != GrSamplerState::kClamp_WrapMode));
-
-        if (tiled && !isPow2) {
-            v[3] |= kNPOTBit;
-            if (GrSamplerState::kNearest_Filter != sampler->getFilter()) {
-                v[3] |= kFilterBit;
-            }
-        }
-    }
-
-    if (scratch) {
-        v[3] |= kScratchBit;
-    }
-
-    v[3] |= kTextureBit;
-
-    return v[3] & kNPOTBit;
-}
-
-// we should never have more than one stencil buffer with same combo of
-// (width,height,samplecount)
-void gen_stencil_key_values(int width, int height,
-                            int sampleCnt, uint32_t v[4]) {
-    v[0] = width;
-    v[1] = height;
-    v[2] = sampleCnt;
-    v[3] = kStencilBufferBit;
-}
-
-void gen_stencil_key_values(const GrStencilBuffer* sb,
-                            uint32_t v[4]) {
-    gen_stencil_key_values(sb->width(), sb->height(),
-                           sb->numSamples(), v);
-}
-
-}
-
-GrContext::TextureCacheEntry GrContext::findAndLockTexture(
-        TextureKey key,
-        int width,
-        int height,
-        const GrSamplerState* sampler) {
-    uint32_t v[4];
-    gen_texture_key_values(fGpu, sampler, key, width, height, 0, false, v);
-    GrResourceKey resourceKey(v);
-    return TextureCacheEntry(fTextureCache->findAndLock(resourceKey,
-                                            GrResourceCache::kNested_LockType));
-}
-
-bool GrContext::isTextureInCache(TextureKey key,
-                                 int width,
-                                 int height,
-                                 const GrSamplerState* sampler) const {
-    uint32_t v[4];
-    gen_texture_key_values(fGpu, sampler, key, width, height, 0, false, v);
-    GrResourceKey resourceKey(v);
+bool GrContext::isTextureInCache(const GrTextureDesc& desc,
+                                 const GrCacheID& cacheID,
+                                 const GrTextureParams* params) const {
+    GrResourceKey resourceKey = GrTexture::ComputeKey(fGpu, params, desc, cacheID);
     return fTextureCache->hasKey(resourceKey);
 }
 
-GrResourceEntry* GrContext::addAndLockStencilBuffer(GrStencilBuffer* sb) {
+void GrContext::addStencilBuffer(GrStencilBuffer* sb) {
     ASSERT_OWNED_RESOURCE(sb);
-    uint32_t v[4];
-    gen_stencil_key_values(sb, v);
-    GrResourceKey resourceKey(v);
-    return fTextureCache->createAndLock(resourceKey, sb);
+
+    GrResourceKey resourceKey = GrStencilBuffer::ComputeKey(sb->width(),
+                                                            sb->height(),
+                                                            sb->numSamples());
+    fTextureCache->addResource(resourceKey, sb);
 }
 
 GrStencilBuffer* GrContext::findStencilBuffer(int width, int height,
                                               int sampleCnt) {
-    uint32_t v[4];
-    gen_stencil_key_values(width, height, sampleCnt, v);
-    GrResourceKey resourceKey(v);
-    GrResourceEntry* entry = fTextureCache->findAndLock(resourceKey,
-                                            GrResourceCache::kSingle_LockType);
-    if (NULL != entry) {
-        GrStencilBuffer* sb = (GrStencilBuffer*) entry->resource();
-        return sb;
-    } else {
-        return NULL;
-    }
-}
-
-void GrContext::unlockStencilBuffer(GrResourceEntry* sbEntry) {
-    ASSERT_OWNED_RESOURCE(sbEntry->resource());
-    fTextureCache->unlock(sbEntry);
+    GrResourceKey resourceKey = GrStencilBuffer::ComputeKey(width,
+                                                            height,
+                                                            sampleCnt);
+    GrResource* resource = fTextureCache->find(resourceKey);
+    return static_cast<GrStencilBuffer*>(resource);
 }
 
 static void stretchImage(void* dst,
@@ -276,18 +262,18 @@ static void stretchImage(void* dst,
                          void* src,
                          int srcW,
                          int srcH,
-                         int bpp) {
+                         size_t bpp) {
     GrFixed dx = (srcW << 16) / dstW;
     GrFixed dy = (srcH << 16) / dstH;
 
     GrFixed y = dy >> 1;
 
-    int dstXLimit = dstW*bpp;
+    size_t dstXLimit = dstW*bpp;
     for (int j = 0; j < dstH; ++j) {
         GrFixed x = dx >> 1;
         void* srcRow = (uint8_t*)src + (y>>16)*srcW*bpp;
         void* dstRow = (uint8_t*)dst + j*dstW*bpp;
-        for (int i = 0; i < dstXLimit; i += bpp) {
+        for (size_t i = 0; i < dstXLimit; i += bpp) {
             memcpy((uint8_t*) dstRow + i,
                    (uint8_t*) srcRow + (x>>16)*bpp,
                    bpp);
@@ -297,221 +283,286 @@ static void stretchImage(void* dst,
     }
 }
 
-GrContext::TextureCacheEntry GrContext::createAndLockTexture(
-        TextureKey key,
-        const GrSamplerState* sampler,
-        const GrTextureDesc& desc,
-        void* srcData,
-        size_t rowBytes) {
-    SK_TRACE_EVENT0("GrContext::createAndLockTexture");
+namespace {
 
-#if GR_DUMP_TEXTURE_UPLOAD
-    GrPrintf("GrContext::createAndLockTexture [%d %d]\n", desc.fWidth, desc.fHeight);
-#endif
+// position + local coordinate
+extern const GrVertexAttrib gVertexAttribs[] = {
+    {kVec2f_GrVertexAttribType, 0,               kPosition_GrVertexAttribBinding},
+    {kVec2f_GrVertexAttribType, sizeof(GrPoint), kLocalCoord_GrVertexAttribBinding}
+};
 
-    TextureCacheEntry entry;
-    uint32_t v[4];
-    bool special = gen_texture_key_values(fGpu, sampler, key,
-                                          desc.fWidth, desc.fHeight,
-                                          desc.fSampleCnt, false, v);
-    GrResourceKey resourceKey(v);
+};
 
-    if (special) {
-        GrAssert(NULL != sampler);
-        TextureCacheEntry clampEntry = this->findAndLockTexture(key,
-                                                                desc.fWidth,
-                                                                desc.fHeight,
-                                                                NULL);
+// The desired texture is NPOT and tiled but that isn't supported by
+// the current hardware. Resize the texture to be a POT
+GrTexture* GrContext::createResizedTexture(const GrTextureDesc& desc,
+                                           const GrCacheID& cacheID,
+                                           void* srcData,
+                                           size_t rowBytes,
+                                           bool filter) {
+    SkAutoTUnref<GrTexture> clampedTexture(this->findAndRefTexture(desc, cacheID, NULL));
+    if (NULL == clampedTexture) {
+        clampedTexture.reset(this->createTexture(NULL, desc, cacheID, srcData, rowBytes));
 
-        if (NULL == clampEntry.texture()) {
-            clampEntry = this->createAndLockTexture(key, NULL, desc,
-                                                    srcData, rowBytes);
-            GrAssert(NULL != clampEntry.texture());
-            if (NULL == clampEntry.texture()) {
-                return entry;
-            }
-        }
-        GrTextureDesc rtDesc = desc;
-        rtDesc.fFlags =  rtDesc.fFlags |
-                         kRenderTarget_GrTextureFlagBit |
-                         kNoStencil_GrTextureFlagBit;
-        rtDesc.fWidth  = GrNextPow2(GrMax(desc.fWidth, 64));
-        rtDesc.fHeight = GrNextPow2(GrMax(desc.fHeight, 64));
-
-        GrTexture* texture = fGpu->createTexture(rtDesc, NULL, 0);
-
-        if (NULL != texture) {
-            GrDrawTarget::AutoStateRestore asr(fGpu);
-            GrDrawState* drawState = fGpu->drawState();
-            drawState->reset();
-            drawState->setRenderTarget(texture->asRenderTarget());
-            drawState->setTexture(0, clampEntry.texture());
-
-            GrSamplerState::Filter filter;
-            // if filtering is not desired then we want to ensure all
-            // texels in the resampled image are copies of texels from
-            // the original.
-            if (GrSamplerState::kNearest_Filter == sampler->getFilter()) {
-                filter = GrSamplerState::kNearest_Filter;
-            } else {
-                filter = GrSamplerState::kBilinear_Filter;
-            }
-            drawState->sampler(0)->reset(GrSamplerState::kClamp_WrapMode,
-                                         filter);
-
-            static const GrVertexLayout layout =
-                                GrDrawTarget::StageTexCoordVertexLayoutBit(0,0);
-            GrDrawTarget::AutoReleaseGeometry arg(fGpu, layout, 4, 0);
-
-            if (arg.succeeded()) {
-                GrPoint* verts = (GrPoint*) arg.vertices();
-                verts[0].setIRectFan(0, 0,
-                                     texture->width(),
-                                     texture->height(),
-                                     2*sizeof(GrPoint));
-                verts[1].setIRectFan(0, 0, 1, 1, 2*sizeof(GrPoint));
-                fGpu->drawNonIndexed(kTriangleFan_PrimitiveType,
-                                     0, 4);
-                entry.set(fTextureCache->createAndLock(resourceKey, texture));
-            }
-            texture->releaseRenderTarget();
-        } else {
-            // TODO: Our CPU stretch doesn't filter. But we create separate
-            // stretched textures when the sampler state is either filtered or
-            // not. Either implement filtered stretch blit on CPU or just create
-            // one when FBO case fails.
-
-            rtDesc.fFlags = kNone_GrTextureFlags;
-            // no longer need to clamp at min RT size.
-            rtDesc.fWidth  = GrNextPow2(desc.fWidth);
-            rtDesc.fHeight = GrNextPow2(desc.fHeight);
-            int bpp = GrBytesPerPixel(desc.fConfig);
-            SkAutoSMalloc<128*128*4> stretchedPixels(bpp *
-                                                     rtDesc.fWidth *
-                                                     rtDesc.fHeight);
-            stretchImage(stretchedPixels.get(), rtDesc.fWidth, rtDesc.fHeight,
-                         srcData, desc.fWidth, desc.fHeight, bpp);
-
-            size_t stretchedRowBytes = rtDesc.fWidth * bpp;
-
-            GrTexture* texture = fGpu->createTexture(rtDesc,
-                                                     stretchedPixels.get(),
-                                                     stretchedRowBytes);
-            GrAssert(NULL != texture);
-            entry.set(fTextureCache->createAndLock(resourceKey, texture));
-        }
-        fTextureCache->unlock(clampEntry.cacheEntry());
-
-    } else {
-        GrTexture* texture = fGpu->createTexture(desc, srcData, rowBytes);
-        if (NULL != texture) {
-            entry.set(fTextureCache->createAndLock(resourceKey, texture));
+        if (NULL == clampedTexture) {
+            return NULL;
         }
     }
-    return entry;
+
+    GrTextureDesc rtDesc = desc;
+    rtDesc.fFlags =  rtDesc.fFlags |
+                     kRenderTarget_GrTextureFlagBit |
+                     kNoStencil_GrTextureFlagBit;
+    rtDesc.fWidth  = GrNextPow2(desc.fWidth);
+    rtDesc.fHeight = GrNextPow2(desc.fHeight);
+
+    GrTexture* texture = fGpu->createTexture(rtDesc, NULL, 0);
+
+    if (NULL != texture) {
+        GrDrawTarget::AutoStateRestore asr(fGpu, GrDrawTarget::kReset_ASRInit);
+        GrDrawState* drawState = fGpu->drawState();
+        drawState->setRenderTarget(texture->asRenderTarget());
+
+        // if filtering is not desired then we want to ensure all
+        // texels in the resampled image are copies of texels from
+        // the original.
+        GrTextureParams params(SkShader::kClamp_TileMode, filter ? GrTextureParams::kBilerp_FilterMode :
+                                                                   GrTextureParams::kNone_FilterMode);
+        drawState->addColorTextureEffect(clampedTexture, SkMatrix::I(), params);
+
+        drawState->setVertexAttribs<gVertexAttribs>(SK_ARRAY_COUNT(gVertexAttribs));
+
+        GrDrawTarget::AutoReleaseGeometry arg(fGpu, 4, 0);
+
+        if (arg.succeeded()) {
+            GrPoint* verts = (GrPoint*) arg.vertices();
+            verts[0].setIRectFan(0, 0, texture->width(), texture->height(), 2 * sizeof(GrPoint));
+            verts[1].setIRectFan(0, 0, 1, 1, 2 * sizeof(GrPoint));
+            fGpu->drawNonIndexed(kTriangleFan_GrPrimitiveType, 0, 4);
+        }
+    } else {
+        // TODO: Our CPU stretch doesn't filter. But we create separate
+        // stretched textures when the texture params is either filtered or
+        // not. Either implement filtered stretch blit on CPU or just create
+        // one when FBO case fails.
+
+        rtDesc.fFlags = kNone_GrTextureFlags;
+        // no longer need to clamp at min RT size.
+        rtDesc.fWidth  = GrNextPow2(desc.fWidth);
+        rtDesc.fHeight = GrNextPow2(desc.fHeight);
+        size_t bpp = GrBytesPerPixel(desc.fConfig);
+        SkAutoSMalloc<128*128*4> stretchedPixels(bpp * rtDesc.fWidth * rtDesc.fHeight);
+        stretchImage(stretchedPixels.get(), rtDesc.fWidth, rtDesc.fHeight,
+                     srcData, desc.fWidth, desc.fHeight, bpp);
+
+        size_t stretchedRowBytes = rtDesc.fWidth * bpp;
+
+        SkDEBUGCODE(GrTexture* texture = )fGpu->createTexture(rtDesc, stretchedPixels.get(),
+                                                              stretchedRowBytes);
+        SkASSERT(NULL != texture);
+    }
+
+    return texture;
 }
 
-namespace {
-inline void gen_scratch_tex_key_values(const GrGpu* gpu, 
-                                       const GrTextureDesc& desc,
-                                       uint32_t v[4]) {
-    // Instead of a client-provided key of the texture contents
-    // we create a key of from the descriptor.
-    GrContext::TextureKey descKey = (desc.fFlags << 8) |
-                                    ((uint64_t) desc.fConfig << 32);
-    // this code path isn't friendly to tiling with NPOT restricitons
-    // We just pass ClampNoFilter()
-    gen_texture_key_values(gpu, NULL, descKey, desc.fWidth,
-                           desc.fHeight, desc.fSampleCnt, true, v);
-}
+GrTexture* GrContext::createTexture(const GrTextureParams* params,
+                                    const GrTextureDesc& desc,
+                                    const GrCacheID& cacheID,
+                                    void* srcData,
+                                    size_t rowBytes,
+                                    GrResourceKey* cacheKey) {
+    SK_TRACE_EVENT0("GrContext::createTexture");
+
+    GrResourceKey resourceKey = GrTexture::ComputeKey(fGpu, params, desc, cacheID);
+
+    GrTexture* texture;
+    if (GrTexture::NeedsResizing(resourceKey)) {
+        texture = this->createResizedTexture(desc, cacheID,
+                                             srcData, rowBytes,
+                                             GrTexture::NeedsBilerp(resourceKey));
+    } else {
+        texture= fGpu->createTexture(desc, srcData, rowBytes);
+    }
+
+    if (NULL != texture) {
+        // Adding a resource could put us overbudget. Try to free up the
+        // necessary space before adding it.
+        fTextureCache->purgeAsNeeded(1, texture->sizeInBytes());
+        fTextureCache->addResource(resourceKey, texture);
+
+        if (NULL != cacheKey) {
+            *cacheKey = resourceKey;
+        }
+    }
+
+    return texture;
 }
 
-GrContext::TextureCacheEntry GrContext::lockScratchTexture(
-                                                const GrTextureDesc& inDesc,
-                                                ScratchTexMatch match) {
+static GrTexture* create_scratch_texture(GrGpu* gpu,
+                                         GrResourceCache* textureCache,
+                                         const GrTextureDesc& desc) {
+    GrTexture* texture = gpu->createTexture(desc, NULL, 0);
+    if (NULL != texture) {
+        GrResourceKey key = GrTexture::ComputeScratchKey(texture->desc());
+        // Adding a resource could put us overbudget. Try to free up the
+        // necessary space before adding it.
+        textureCache->purgeAsNeeded(1, texture->sizeInBytes());
+        // Make the resource exclusive so future 'find' calls don't return it
+        textureCache->addResource(key, texture, GrResourceCache::kHide_OwnershipFlag);
+    }
+    return texture;
+}
+
+GrTexture* GrContext::lockAndRefScratchTexture(const GrTextureDesc& inDesc, ScratchTexMatch match) {
+
+    SkASSERT((inDesc.fFlags & kRenderTarget_GrTextureFlagBit) ||
+             !(inDesc.fFlags & kNoStencil_GrTextureFlagBit));
+
+    // Renderable A8 targets are not universally supported (e.g., not on ANGLE)
+    SkASSERT(this->isConfigRenderable(kAlpha_8_GrPixelConfig, inDesc.fSampleCnt > 0) ||
+             !(inDesc.fFlags & kRenderTarget_GrTextureFlagBit) ||
+             (inDesc.fConfig != kAlpha_8_GrPixelConfig));
+
+    if (!fGpu->caps()->reuseScratchTextures() &&
+        !(inDesc.fFlags & kRenderTarget_GrTextureFlagBit)) {
+        // If we're never recycling this texture we can always make it the right size
+        return create_scratch_texture(fGpu, fTextureCache, inDesc);
+    }
 
     GrTextureDesc desc = inDesc;
-    if (kExact_ScratchTexMatch != match) {
+
+    if (kApprox_ScratchTexMatch == match) {
         // bin by pow2 with a reasonable min
-        static const int MIN_SIZE = 256;
+        static const int MIN_SIZE = 16;
         desc.fWidth  = GrMax(MIN_SIZE, GrNextPow2(desc.fWidth));
         desc.fHeight = GrMax(MIN_SIZE, GrNextPow2(desc.fHeight));
     }
 
-    GrResourceEntry* entry;
+    GrResource* resource = NULL;
     int origWidth = desc.fWidth;
     int origHeight = desc.fHeight;
-    bool doubledW = false;
-    bool doubledH = false;
 
     do {
-        uint32_t v[4];
-        gen_scratch_tex_key_values(fGpu, desc, v);
-        GrResourceKey key(v);
-        entry = fTextureCache->findAndLock(key,
-                                           GrResourceCache::kNested_LockType);
-        // if we miss, relax the fit of the flags...
-        // then try doubling width... then height.
-        if (NULL != entry || kExact_ScratchTexMatch == match) {
+        GrResourceKey key = GrTexture::ComputeScratchKey(desc);
+        // Ensure we have exclusive access to the texture so future 'find' calls don't return it
+        resource = fTextureCache->find(key, GrResourceCache::kHide_OwnershipFlag);
+        if (NULL != resource) {
+            resource->ref();
             break;
         }
-        if (!(desc.fFlags & kRenderTarget_GrTextureFlagBit)) {
-            desc.fFlags = desc.fFlags | kRenderTarget_GrTextureFlagBit;
-        } else if (desc.fFlags & kNoStencil_GrTextureFlagBit) {
+        if (kExact_ScratchTexMatch == match) {
+            break;
+        }
+        // We had a cache miss and we are in approx mode, relax the fit of the flags.
+
+        // We no longer try to reuse textures that were previously used as render targets in
+        // situations where no RT is needed; doing otherwise can confuse the video driver and
+        // cause significant performance problems in some cases.
+        if (desc.fFlags & kNoStencil_GrTextureFlagBit) {
             desc.fFlags = desc.fFlags & ~kNoStencil_GrTextureFlagBit;
-        } else if (!doubledW) {
-            desc.fFlags = inDesc.fFlags;
-            desc.fWidth *= 2;
-            doubledW = true;
-        } else if (!doubledH) {
-            desc.fFlags = inDesc.fFlags;
-            desc.fWidth = origWidth;
-            desc.fHeight *= 2;
-            doubledH = true;
         } else {
             break;
         }
-        
+
     } while (true);
 
-    if (NULL == entry) {
+    if (NULL == resource) {
         desc.fFlags = inDesc.fFlags;
         desc.fWidth = origWidth;
         desc.fHeight = origHeight;
-        GrTexture* texture = fGpu->createTexture(desc, NULL, 0);
-        if (NULL != texture) {
-            uint32_t v[4];
-            gen_scratch_tex_key_values(fGpu, desc, v);
-            GrResourceKey key(v);
-            entry = fTextureCache->createAndLock(key, texture);
-        }
+        resource = create_scratch_texture(fGpu, fTextureCache, desc);
     }
 
-    // If the caller gives us the same desc/sampler twice we don't want
-    // to return the same texture the second time (unless it was previously
-    // released). So we detach the entry from the cache and reattach at release.
-    if (NULL != entry) {
-        fTextureCache->detach(entry);
-    }
-    return TextureCacheEntry(entry);
+    return static_cast<GrTexture*>(resource);
 }
 
-void GrContext::unlockTexture(TextureCacheEntry entry) {
-    ASSERT_OWNED_RESOURCE(entry.texture());
+void GrContext::addExistingTextureToCache(GrTexture* texture) {
+
+    if (NULL == texture) {
+        return;
+    }
+
+    // This texture should already have a cache entry since it was once
+    // attached
+    SkASSERT(NULL != texture->getCacheEntry());
+
+    // Conceptually, the cache entry is going to assume responsibility
+    // for the creation ref. Assert refcnt == 1.
+    SkASSERT(texture->unique());
+
+    if (fGpu->caps()->reuseScratchTextures() || NULL != texture->asRenderTarget()) {
+        // Since this texture came from an AutoScratchTexture it should
+        // still be in the exclusive pile. Recycle it.
+        fTextureCache->makeNonExclusive(texture->getCacheEntry());
+        this->purgeCache();
+    } else if (texture->getDeferredRefCount() <= 0) {
+        // When we aren't reusing textures we know this scratch texture
+        // will never be reused and would be just wasting time in the cache
+        fTextureCache->makeNonExclusive(texture->getCacheEntry());
+        fTextureCache->deleteResource(texture->getCacheEntry());
+    } else {
+        // In this case (fDeferredRefCount > 0) but the cache is the only
+        // one holding a real ref. Mark the object so when the deferred
+        // ref count goes to 0 the texture will be deleted (remember
+        // in this code path scratch textures aren't getting reused).
+        texture->setNeedsDeferredUnref();
+    }
+}
+
+
+void GrContext::unlockScratchTexture(GrTexture* texture) {
+    ASSERT_OWNED_RESOURCE(texture);
+    SkASSERT(NULL != texture->getCacheEntry());
+
     // If this is a scratch texture we detached it from the cache
     // while it was locked (to avoid two callers simultaneously getting
     // the same texture).
-    if (kScratchBit & entry.cacheEntry()->key().getValue32(3)) {
-        fTextureCache->reattachAndUnlock(entry.cacheEntry());
-    } else {
-        fTextureCache->unlock(entry.cacheEntry());
+    if (texture->getCacheEntry()->key().isScratch()) {
+        if (fGpu->caps()->reuseScratchTextures() || NULL != texture->asRenderTarget()) {
+            fTextureCache->makeNonExclusive(texture->getCacheEntry());
+            this->purgeCache();
+        } else if (texture->unique() && texture->getDeferredRefCount() <= 0) {
+            // Only the cache now knows about this texture. Since we're never
+            // reusing scratch textures (in this code path) it would just be
+            // wasting time sitting in the cache.
+            fTextureCache->makeNonExclusive(texture->getCacheEntry());
+            fTextureCache->deleteResource(texture->getCacheEntry());
+        } else {
+            // In this case (fRefCnt > 1 || defRefCnt > 0) but we don't really
+            // want to readd it to the cache (since it will never be reused).
+            // Instead, give up the cache's ref and leave the decision up to
+            // addExistingTextureToCache once its ref count reaches 0. For
+            // this to work we need to leave it in the exclusive list.
+            texture->setFlag((GrTextureFlags) GrTexture::kReturnToCache_FlagBit);
+            // Give up the cache's ref to the texture
+            texture->unref();
+        }
     }
 }
 
-GrTexture* GrContext::createUncachedTexture(const GrTextureDesc& desc,
+void GrContext::purgeCache() {
+    if (NULL != fTextureCache) {
+        fTextureCache->purgeAsNeeded();
+    }
+}
+
+bool GrContext::OverbudgetCB(void* data) {
+    SkASSERT(NULL != data);
+
+    GrContext* context = reinterpret_cast<GrContext*>(data);
+
+    // Flush the InOrderDrawBuffer to possibly free up some textures
+    context->fFlushToReduceCacheSize = true;
+
+    return true;
+}
+
+
+GrTexture* GrContext::createUncachedTexture(const GrTextureDesc& descIn,
                                             void* srcData,
                                             size_t rowBytes) {
-    return fGpu->createTexture(desc, srcData, rowBytes);
+    GrTextureDesc descCopy = descIn;
+    return fGpu->createTexture(descCopy, srcData, rowBytes);
 }
 
 void GrContext::getTextureCacheLimits(int* maxTextures,
@@ -524,120 +575,98 @@ void GrContext::setTextureCacheLimits(int maxTextures, size_t maxTextureBytes) {
 }
 
 int GrContext::getMaxTextureSize() const {
-    return fGpu->getCaps().fMaxTextureSize;
+    return GrMin(fGpu->caps()->maxTextureSize(), fMaxTextureSizeOverride);
 }
 
 int GrContext::getMaxRenderTargetSize() const {
-    return fGpu->getCaps().fMaxRenderTargetSize;
+    return fGpu->caps()->maxRenderTargetSize();
+}
+
+int GrContext::getMaxSampleCount() const {
+    return fGpu->caps()->maxSampleCount();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-GrTexture* GrContext::createPlatformTexture(const GrPlatformTextureDesc& desc) {
-    return fGpu->createPlatformTexture(desc);
+GrTexture* GrContext::wrapBackendTexture(const GrBackendTextureDesc& desc) {
+    return fGpu->wrapBackendTexture(desc);
 }
 
-GrRenderTarget* GrContext::createPlatformRenderTarget(const GrPlatformRenderTargetDesc& desc) {
-    return fGpu->createPlatformRenderTarget(desc);
+GrRenderTarget* GrContext::wrapBackendRenderTarget(const GrBackendRenderTargetDesc& desc) {
+    return fGpu->wrapBackendRenderTarget(desc);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-bool GrContext::supportsIndex8PixelConfig(const GrSamplerState* sampler,
+bool GrContext::supportsIndex8PixelConfig(const GrTextureParams* params,
                                           int width, int height) const {
-    const GrDrawTarget::Caps& caps = fGpu->getCaps();
-    if (!caps.f8BitPaletteSupport) {
+    const GrDrawTargetCaps* caps = fGpu->caps();
+    if (!caps->eightBitPaletteSupport()) {
         return false;
     }
 
     bool isPow2 = GrIsPow2(width) && GrIsPow2(height);
 
     if (!isPow2) {
-        bool tiled = NULL != sampler &&
-                     (sampler->getWrapX() != GrSamplerState::kClamp_WrapMode ||
-                      sampler->getWrapY() != GrSamplerState::kClamp_WrapMode);
-        if (tiled && !caps.fNPOTTextureTileSupport) {
+        bool tiled = NULL != params && params->isTiled();
+        if (tiled && !caps->npotTextureTileSupport()) {
             return false;
         }
     }
     return true;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
-const GrClip& GrContext::getClip() const { return fGpu->getClip(); }
-
-void GrContext::setClip(const GrClip& clip) {
-    fGpu->setClip(clip);
-    fGpu->drawState()->enableState(GrDrawState::kClip_StateBit);
-}
-
-void GrContext::setClip(const GrIRect& rect) {
-    GrClip clip;
-    clip.setFromIRect(rect);
-    fGpu->setClip(clip);
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void GrContext::clear(const GrIRect* rect, const GrColor color) {
-    this->flush();
-    fGpu->clear(rect, color);
+void GrContext::clear(const SkIRect* rect,
+                      const GrColor color,
+                      bool canIgnoreRect,
+                      GrRenderTarget* target) {
+    AutoRestoreEffects are;
+    AutoCheckFlush acf(this);
+    this->prepareToDraw(NULL, BUFFERED_DRAW, &are, &acf)->clear(rect, color,
+                                                                canIgnoreRect, target);
 }
 
-void GrContext::drawPaint(const GrPaint& paint) {
+void GrContext::drawPaint(const GrPaint& origPaint) {
     // set rect to be big enough to fill the space, but not super-huge, so we
     // don't overflow fixed-point implementations
-    GrRect r;
+    SkRect r;
     r.setLTRB(0, 0,
-              GrIntToScalar(getRenderTarget()->width()),
-              GrIntToScalar(getRenderTarget()->height()));
-    GrMatrix inverse;
-    SkTLazy<GrPaint> tmpPaint;
-    const GrPaint* p = &paint;
-    GrDrawState* drawState = fGpu->drawState();
-    GrAutoMatrix am;
+              SkIntToScalar(getRenderTarget()->width()),
+              SkIntToScalar(getRenderTarget()->height()));
+    SkMatrix inverse;
+    SkTCopyOnFirstWrite<GrPaint> paint(origPaint);
+    AutoMatrix am;
 
     // We attempt to map r by the inverse matrix and draw that. mapRect will
     // map the four corners and bound them with a new rect. This will not
     // produce a correct result for some perspective matrices.
     if (!this->getMatrix().hasPerspective()) {
-        if (!drawState->getViewInverse(&inverse)) {
-            GrPrintf("Could not invert matrix");
+        if (!fViewMatrix.invert(&inverse)) {
+            GrPrintf("Could not invert matrix\n");
             return;
         }
         inverse.mapRect(&r);
     } else {
-        if (paint.getActiveMaskStageMask() || paint.getActiveStageMask()) {
-            if (!drawState->getViewInverse(&inverse)) {
-                GrPrintf("Could not invert matrix");
-                return;
-            }
-            tmpPaint.set(paint);
-            tmpPaint.get()->preConcatActiveSamplerMatrices(inverse);
-            p = tmpPaint.get();
+        if (!am.setIdentity(this, paint.writable())) {
+            GrPrintf("Could not invert matrix\n");
+            return;
         }
-        am.set(this, GrMatrix::I());
     }
     // by definition this fills the entire clip, no need for AA
-    if (paint.fAntiAlias) {
-        if (!tmpPaint.isValid()) {
-            tmpPaint.set(paint);
-            p = tmpPaint.get();
-        }
-        GrAssert(p == tmpPaint.get());
-        tmpPaint.get()->fAntiAlias = false;
+    if (paint->isAntiAlias()) {
+        paint.writable()->setAntiAlias(false);
     }
-    this->drawRect(*p, r);
+    this->drawRect(*paint, r);
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
-namespace {
-inline bool disable_coverage_aa_for_blend(GrDrawTarget* target) {
-    return DISABLE_COVERAGE_AA_FOR_BLEND && !target->canApplyCoverage();
+#ifdef SK_DEVELOPER
+void GrContext::dumpFontCache() const {
+    fFontCache->dump();
 }
-}
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -646,9 +675,9 @@ inline bool disable_coverage_aa_for_blend(GrDrawTarget* target) {
  could use an indices array, and then only send 8 verts, but not sure that
  would be faster.
  */
-static void setStrokeRectStrip(GrPoint verts[10], GrRect rect,
-                               GrScalar width) {
-    const GrScalar rad = GrScalarHalf(width);
+static void setStrokeRectStrip(GrPoint verts[10], SkRect rect,
+                               SkScalar width) {
+    const SkScalar rad = SkScalarHalf(width);
     rect.sort();
 
     verts[0].set(rect.fLeft + rad, rect.fTop + rad);
@@ -663,232 +692,19 @@ static void setStrokeRectStrip(GrPoint verts[10], GrRect rect,
     verts[9] = verts[1];
 }
 
-static void setInsetFan(GrPoint* pts, size_t stride,
-                        const GrRect& r, GrScalar dx, GrScalar dy) {
-    pts->setRectFan(r.fLeft + dx, r.fTop + dy, r.fRight - dx, r.fBottom - dy, stride);
-}
-
-static const uint16_t gFillAARectIdx[] = {
-    0, 1, 5, 5, 4, 0,
-    1, 2, 6, 6, 5, 1,
-    2, 3, 7, 7, 6, 2,
-    3, 0, 4, 4, 7, 3,
-    4, 5, 6, 6, 7, 4,
-};
-
-int GrContext::aaFillRectIndexCount() const {
-    return GR_ARRAY_COUNT(gFillAARectIdx);
-}
-
-GrIndexBuffer* GrContext::aaFillRectIndexBuffer() {
-    if (NULL == fAAFillRectIndexBuffer) {
-        fAAFillRectIndexBuffer = fGpu->createIndexBuffer(sizeof(gFillAARectIdx),
-                                                         false);
-        if (NULL != fAAFillRectIndexBuffer) {
-    #if GR_DEBUG
-            bool updated =
-    #endif
-            fAAFillRectIndexBuffer->updateData(gFillAARectIdx,
-                                               sizeof(gFillAARectIdx));
-            GR_DEBUGASSERT(updated);
-        }
-    }
-    return fAAFillRectIndexBuffer;
-}
-
-static const uint16_t gStrokeAARectIdx[] = {
-    0 + 0, 1 + 0, 5 + 0, 5 + 0, 4 + 0, 0 + 0,
-    1 + 0, 2 + 0, 6 + 0, 6 + 0, 5 + 0, 1 + 0,
-    2 + 0, 3 + 0, 7 + 0, 7 + 0, 6 + 0, 2 + 0,
-    3 + 0, 0 + 0, 4 + 0, 4 + 0, 7 + 0, 3 + 0,
-
-    0 + 4, 1 + 4, 5 + 4, 5 + 4, 4 + 4, 0 + 4,
-    1 + 4, 2 + 4, 6 + 4, 6 + 4, 5 + 4, 1 + 4,
-    2 + 4, 3 + 4, 7 + 4, 7 + 4, 6 + 4, 2 + 4,
-    3 + 4, 0 + 4, 4 + 4, 4 + 4, 7 + 4, 3 + 4,
-
-    0 + 8, 1 + 8, 5 + 8, 5 + 8, 4 + 8, 0 + 8,
-    1 + 8, 2 + 8, 6 + 8, 6 + 8, 5 + 8, 1 + 8,
-    2 + 8, 3 + 8, 7 + 8, 7 + 8, 6 + 8, 2 + 8,
-    3 + 8, 0 + 8, 4 + 8, 4 + 8, 7 + 8, 3 + 8,
-};
-
-int GrContext::aaStrokeRectIndexCount() const {
-    return GR_ARRAY_COUNT(gStrokeAARectIdx);
-}
-
-GrIndexBuffer* GrContext::aaStrokeRectIndexBuffer() {
-    if (NULL == fAAStrokeRectIndexBuffer) {
-        fAAStrokeRectIndexBuffer = fGpu->createIndexBuffer(sizeof(gStrokeAARectIdx),
-                                                           false);
-        if (NULL != fAAStrokeRectIndexBuffer) {
-    #if GR_DEBUG
-            bool updated =
-    #endif
-            fAAStrokeRectIndexBuffer->updateData(gStrokeAARectIdx,
-                                                 sizeof(gStrokeAARectIdx));
-            GR_DEBUGASSERT(updated);
-        }
-    }
-    return fAAStrokeRectIndexBuffer;
-}
-
-static GrVertexLayout aa_rect_layout(const GrDrawTarget* target,
-                                     bool useCoverage) {
-    GrVertexLayout layout = 0;
-    for (int s = 0; s < GrDrawState::kNumStages; ++s) {
-        if (NULL != target->getDrawState().getTexture(s)) {
-            layout |= GrDrawTarget::StagePosAsTexCoordVertexLayoutBit(s);
-        }
-    }
-    if (useCoverage) {
-        layout |= GrDrawTarget::kCoverage_VertexLayoutBit;
-    } else {
-        layout |= GrDrawTarget::kColor_VertexLayoutBit;
-    }
-    return layout;
-}
-
-void GrContext::fillAARect(GrDrawTarget* target,
-                           const GrRect& devRect,
-                           bool useVertexCoverage) {
-    GrVertexLayout layout = aa_rect_layout(target, useVertexCoverage);
-
-    size_t vsize = GrDrawTarget::VertexSize(layout);
-
-    GrDrawTarget::AutoReleaseGeometry geo(target, layout, 8, 0);
-    if (!geo.succeeded()) {
-        GrPrintf("Failed to get space for vertices!\n");
-        return;
-    }
-    GrIndexBuffer* indexBuffer = this->aaFillRectIndexBuffer();
-    if (NULL == indexBuffer) {
-        GrPrintf("Failed to create index buffer!\n");
-        return;
-    }
-
-    intptr_t verts = reinterpret_cast<intptr_t>(geo.vertices());
-
-    GrPoint* fan0Pos = reinterpret_cast<GrPoint*>(verts);
-    GrPoint* fan1Pos = reinterpret_cast<GrPoint*>(verts + 4 * vsize);
-
-    setInsetFan(fan0Pos, vsize, devRect, -GR_ScalarHalf, -GR_ScalarHalf);
-    setInsetFan(fan1Pos, vsize, devRect,  GR_ScalarHalf,  GR_ScalarHalf);
-
-    verts += sizeof(GrPoint);
-    for (int i = 0; i < 4; ++i) {
-        *reinterpret_cast<GrColor*>(verts + i * vsize) = 0;
-    }
-
-    GrColor innerColor;
-    if (useVertexCoverage) {
-        innerColor = 0xffffffff;
-    } else {
-        innerColor = target->getDrawState().getColor();
-    }
-
-    verts += 4 * vsize;
-    for (int i = 0; i < 4; ++i) {
-        *reinterpret_cast<GrColor*>(verts + i * vsize) = innerColor;
-    }
-
-    target->setIndexSourceToBuffer(indexBuffer);
-
-    target->drawIndexed(kTriangles_PrimitiveType, 0,
-                         0, 8, this->aaFillRectIndexCount());
-}
-
-void GrContext::strokeAARect(GrDrawTarget* target,
-                             const GrRect& devRect,
-                             const GrVec& devStrokeSize,
-                             bool useVertexCoverage) {
-    const GrScalar& dx = devStrokeSize.fX;
-    const GrScalar& dy = devStrokeSize.fY;
-    const GrScalar rx = GrMul(dx, GR_ScalarHalf);
-    const GrScalar ry = GrMul(dy, GR_ScalarHalf);
-
-    GrScalar spare;
-    {
-        GrScalar w = devRect.width() - dx;
-        GrScalar h = devRect.height() - dy;
-        spare = GrMin(w, h);
-    }
-
-    if (spare <= 0) {
-        GrRect r(devRect);
-        r.inset(-rx, -ry);
-        fillAARect(target, r, useVertexCoverage);
-        return;
-    }
-    GrVertexLayout layout = aa_rect_layout(target, useVertexCoverage);
-    size_t vsize = GrDrawTarget::VertexSize(layout);
-
-    GrDrawTarget::AutoReleaseGeometry geo(target, layout, 16, 0);
-    if (!geo.succeeded()) {
-        GrPrintf("Failed to get space for vertices!\n");
-        return;
-    }
-    GrIndexBuffer* indexBuffer = this->aaStrokeRectIndexBuffer();
-    if (NULL == indexBuffer) {
-        GrPrintf("Failed to create index buffer!\n");
-        return;
-    }
-
-    intptr_t verts = reinterpret_cast<intptr_t>(geo.vertices());
-
-    GrPoint* fan0Pos = reinterpret_cast<GrPoint*>(verts);
-    GrPoint* fan1Pos = reinterpret_cast<GrPoint*>(verts + 4 * vsize);
-    GrPoint* fan2Pos = reinterpret_cast<GrPoint*>(verts + 8 * vsize);
-    GrPoint* fan3Pos = reinterpret_cast<GrPoint*>(verts + 12 * vsize);
-
-    setInsetFan(fan0Pos, vsize, devRect, -rx - GR_ScalarHalf, -ry - GR_ScalarHalf);
-    setInsetFan(fan1Pos, vsize, devRect, -rx + GR_ScalarHalf, -ry + GR_ScalarHalf);
-    setInsetFan(fan2Pos, vsize, devRect,  rx - GR_ScalarHalf,  ry - GR_ScalarHalf);
-    setInsetFan(fan3Pos, vsize, devRect,  rx + GR_ScalarHalf,  ry + GR_ScalarHalf);
-
-    verts += sizeof(GrPoint);
-    for (int i = 0; i < 4; ++i) {
-        *reinterpret_cast<GrColor*>(verts + i * vsize) = 0;
-    }
-
-    GrColor innerColor;
-    if (useVertexCoverage) {
-        innerColor = 0xffffffff;
-    } else {
-        innerColor = target->getDrawState().getColor();
-    }
-    verts += 4 * vsize;
-    for (int i = 0; i < 8; ++i) {
-        *reinterpret_cast<GrColor*>(verts + i * vsize) = innerColor;
-    }
-
-    verts += 8 * vsize;
-    for (int i = 0; i < 8; ++i) {
-        *reinterpret_cast<GrColor*>(verts + i * vsize) = 0;
-    }
-
-    target->setIndexSourceToBuffer(indexBuffer);
-    target->drawIndexed(kTriangles_PrimitiveType,
-                        0, 0, 16, aaStrokeRectIndexCount());
-}
-
-/**
- * Returns true if the rects edges are integer-aligned.
- */
-static bool isIRect(const GrRect& r) {
-    return GrScalarIsInt(r.fLeft) && GrScalarIsInt(r.fTop) && 
-           GrScalarIsInt(r.fRight) && GrScalarIsInt(r.fBottom);
+static bool isIRect(const SkRect& r) {
+    return SkScalarIsInt(r.fLeft)  && SkScalarIsInt(r.fTop) &&
+           SkScalarIsInt(r.fRight) && SkScalarIsInt(r.fBottom);
 }
 
 static bool apply_aa_to_rect(GrDrawTarget* target,
-                             const GrRect& rect,
-                             GrScalar width, 
-                             const GrMatrix* matrix,
-                             GrMatrix* combinedMatrix,
-                             GrRect* devRect,
+                             const SkRect& rect,
+                             SkScalar strokeWidth,
+                             const SkMatrix& combinedMatrix,
+                             SkRect* devBoundRect,
                              bool* useVertexCoverage) {
     // we use a simple coverage ramp to do aa on axis-aligned rects
-    // we check if the rect will be axis-aligned, and the rect won't land on 
+    // we check if the rect will be axis-aligned, and the rect won't land on
     // integer coords.
 
     // we are keeping around the "tweak the alpha" trick because
@@ -896,9 +712,9 @@ static bool apply_aa_to_rect(GrDrawTarget* target,
     // In a shader implementation we can give a separate coverage input
     // TODO: remove this ugliness when we drop the fixed-pipe impl
     *useVertexCoverage = false;
-    if (!target->canTweakAlphaForCoverage()) {
-        if (disable_coverage_aa_for_blend(target)) {
-#if GR_DEBUG
+    if (!target->getDrawState().canTweakAlphaForCoverage()) {
+        if (target->shouldDisableCoverageAAForBlend()) {
+#ifdef SK_DEBUG
             //GrPrintf("Turning off AA to correctly apply blend.\n");
 #endif
             return false;
@@ -911,67 +727,110 @@ static bool apply_aa_to_rect(GrDrawTarget* target,
         return false;
     }
 
-    if (0 == width && target->willUseHWAALines()) {
+    if (0 == strokeWidth && target->willUseHWAALines()) {
         return false;
     }
 
-    if (!drawState.getViewMatrix().preservesAxisAlignment()) {
-        return false;
-    }
+#if defined(SHADER_AA_FILL_RECT) || !defined(IGNORE_ROT_AA_RECT_OPT)
+    if (strokeWidth >= 0) {
+#endif
+        if (!combinedMatrix.preservesAxisAlignment()) {
+            return false;
+        }
 
-    if (NULL != matrix && 
-        !matrix->preservesAxisAlignment()) {
-        return false;
+#if defined(SHADER_AA_FILL_RECT) || !defined(IGNORE_ROT_AA_RECT_OPT)
+    } else {
+        if (!combinedMatrix.preservesRightAngles()) {
+            return false;
+        }
     }
+#endif
 
-    *combinedMatrix = drawState.getViewMatrix();
-    if (NULL != matrix) {
-        combinedMatrix->preConcat(*matrix);
-        GrAssert(combinedMatrix->preservesAxisAlignment());
-    }
-    
-    combinedMatrix->mapRect(devRect, rect);
-    devRect->sort();
+    combinedMatrix.mapRect(devBoundRect, rect);
 
-    if (width < 0) {
-        return !isIRect(*devRect);
+    if (strokeWidth < 0) {
+        return !isIRect(*devBoundRect);
     } else {
         return true;
     }
 }
 
+static inline bool rect_contains_inclusive(const SkRect& rect, const SkPoint& point) {
+    return point.fX >= rect.fLeft && point.fX <= rect.fRight &&
+           point.fY >= rect.fTop && point.fY <= rect.fBottom;
+}
+
 void GrContext::drawRect(const GrPaint& paint,
-                         const GrRect& rect,
-                         GrScalar width,
-                         const GrMatrix* matrix) {
+                         const SkRect& rect,
+                         const SkStrokeRec* stroke,
+                         const SkMatrix* matrix) {
     SK_TRACE_EVENT0("GrContext::drawRect");
 
-    GrDrawTarget* target = this->prepareToDraw(paint, kUnbuffered_DrawCategory);
-    int stageMask = paint.getActiveStageMask();
+    AutoRestoreEffects are;
+    AutoCheckFlush acf(this);
+    GrDrawTarget* target = this->prepareToDraw(&paint, BUFFERED_DRAW, &are, &acf);
 
-    GrRect devRect = rect;
-    GrMatrix combinedMatrix;
-    bool useVertexCoverage;
-    bool needAA = paint.fAntiAlias &&
-                  !this->getRenderTarget()->isMultisampled();
-    bool doAA = needAA && apply_aa_to_rect(target, rect, width, matrix,
-                                           &combinedMatrix, &devRect,
-                                           &useVertexCoverage);
+    SkScalar width = stroke == NULL ? -1 : stroke->getWidth();
+    SkMatrix combinedMatrix = target->drawState()->getViewMatrix();
+    if (NULL != matrix) {
+        combinedMatrix.preConcat(*matrix);
+    }
 
-    if (doAA) {
-        GrDrawTarget::AutoDeviceCoordDraw adcd(target, stageMask);
-        if (width >= 0) {
-            GrVec strokeSize;;
-            if (width > 0) {
-                strokeSize.set(width, width);
-                combinedMatrix.mapVectors(&strokeSize, 1);
-                strokeSize.setAbs(strokeSize);
-            } else {
-                strokeSize.set(GR_Scalar1, GR_Scalar1);
+    // Check if this is a full RT draw and can be replaced with a clear. We don't bother checking
+    // cases where the RT is fully inside a stroke.
+    if (width < 0) {
+        SkRect rtRect;
+        target->getDrawState().getRenderTarget()->getBoundsRect(&rtRect);
+        SkRect clipSpaceRTRect = rtRect;
+        bool checkClip = false;
+        if (NULL != this->getClip()) {
+            checkClip = true;
+            clipSpaceRTRect.offset(SkIntToScalar(this->getClip()->fOrigin.fX),
+                                   SkIntToScalar(this->getClip()->fOrigin.fY));
+        }
+        // Does the clip contain the entire RT?
+        if (!checkClip || target->getClip()->fClipStack->quickContains(clipSpaceRTRect)) {
+            SkMatrix invM;
+            if (!combinedMatrix.invert(&invM)) {
+                return;
             }
-            strokeAARect(target, devRect, strokeSize, useVertexCoverage);
+            // Does the rect bound the RT?
+            SkPoint srcSpaceRTQuad[4];
+            invM.mapRectToQuad(srcSpaceRTQuad, rtRect);
+            if (rect_contains_inclusive(rect, srcSpaceRTQuad[0]) &&
+                rect_contains_inclusive(rect, srcSpaceRTQuad[1]) &&
+                rect_contains_inclusive(rect, srcSpaceRTQuad[2]) &&
+                rect_contains_inclusive(rect, srcSpaceRTQuad[3])) {
+                // Will it blend?
+                GrColor clearColor;
+                if (paint.isOpaqueAndConstantColor(&clearColor)) {
+                    target->clear(NULL, clearColor, true);
+                    return;
+                }
+            }
+        }
+    }
+
+    SkRect devBoundRect;
+    bool useVertexCoverage;
+    bool needAA = paint.isAntiAlias() &&
+                  !target->getDrawState().getRenderTarget()->isMultisampled();
+    bool doAA = needAA && apply_aa_to_rect(target, rect, width, combinedMatrix, &devBoundRect,
+                                           &useVertexCoverage);
+    if (doAA) {
+        GrDrawState::AutoViewMatrixRestore avmr;
+        if (!avmr.setIdentity(target->drawState())) {
+            return;
+        }
+        if (width >= 0) {
+            fAARectRenderer->strokeAARect(this->getGpu(), target, rect,
+                                          combinedMatrix, devBoundRect,
+                                          stroke, useVertexCoverage);
         } else {
-            fillAARect(target, devRect, useVertexCoverage);
+            // filled AA rect
+            fAARectRenderer->fillAARect(this->getGpu(), target,
+                                        rect, combinedMatrix, devBoundRect,
+                                        useVertexCoverage);
         }
         return;
     }
@@ -980,10 +839,10 @@ void GrContext::drawRect(const GrPaint& paint,
         // TODO: consider making static vertex buffers for these cases.
         // Hairline could be done by just adding closing vertex to
         // unitSquareVertexBuffer()
-        GrVertexLayout layout =  PaintStageVertexLayoutBits(paint, NULL);
 
         static const int worstCaseVertCount = 10;
-        GrDrawTarget::AutoReleaseGeometry geo(target, layout, worstCaseVertCount, 0);
+        target->drawState()->setDefaultVertexAttribs();
+        GrDrawTarget::AutoReleaseGeometry geo(target, worstCaseVertCount, 0);
 
         if (!geo.succeeded()) {
             GrPrintf("Failed to get space for vertices!\n");
@@ -996,12 +855,12 @@ void GrContext::drawRect(const GrPaint& paint,
 
         if (width > 0) {
             vertCount = 10;
-            primType = kTriangleStrip_PrimitiveType;
+            primType = kTriangleStrip_GrPrimitiveType;
             setStrokeRectStrip(vertex, rect, width);
         } else {
             // hairline
             vertCount = 5;
-            primType = kLineStrip_PrimitiveType;
+            primType = kLineStrip_GrPrimitiveType;
             vertex[0].set(rect.fLeft, rect.fTop);
             vertex[1].set(rect.fRight, rect.fTop);
             vertex[2].set(rect.fRight, rect.fBottom);
@@ -1012,111 +871,66 @@ void GrContext::drawRect(const GrPaint& paint,
         GrDrawState::AutoViewMatrixRestore avmr;
         if (NULL != matrix) {
             GrDrawState* drawState = target->drawState();
-            avmr.set(drawState);
-            drawState->preConcatViewMatrix(*matrix);
-            drawState->preConcatSamplerMatrices(stageMask, *matrix);
+            avmr.set(drawState, *matrix);
         }
 
         target->drawNonIndexed(primType, 0, vertCount);
     } else {
-#if GR_STATIC_RECT_VB
-            GrVertexLayout layout = PaintStageVertexLayoutBits(paint, NULL);
-            const GrVertexBuffer* sqVB = fGpu->getUnitSquareVertexBuffer();
-            if (NULL == sqVB) {
-                GrPrintf("Failed to create static rect vb.\n");
-                return;
-            }
-            target->setVertexSourceToBuffer(layout, sqVB);
-            GrDrawState* drawState = target->drawState();
-            GrDrawState::AutoViewMatrixRestore avmr(drawState);
-            GrMatrix m;
-            m.setAll(rect.width(),    0,             rect.fLeft,
-                        0,            rect.height(), rect.fTop,
-                        0,            0,             GrMatrix::I()[8]);
-
-            if (NULL != matrix) {
-                m.postConcat(*matrix);
-            }
-            drawState->preConcatViewMatrix(m);
-            drawState->preConcatSamplerMatrices(stageMask, m);
- 
-            target->drawNonIndexed(kTriangleFan_PrimitiveType, 0, 4);
-#else
-            target->drawSimpleRect(rect, matrix, stageMask);
-#endif
+        // filled BW rect
+        target->drawSimpleRect(rect, matrix);
     }
 }
 
 void GrContext::drawRectToRect(const GrPaint& paint,
-                               const GrRect& dstRect,
-                               const GrRect& srcRect,
-                               const GrMatrix* dstMatrix,
-                               const GrMatrix* srcMatrix) {
+                               const SkRect& dstRect,
+                               const SkRect& localRect,
+                               const SkMatrix* dstMatrix,
+                               const SkMatrix* localMatrix) {
     SK_TRACE_EVENT0("GrContext::drawRectToRect");
+    AutoRestoreEffects are;
+    AutoCheckFlush acf(this);
+    GrDrawTarget* target = this->prepareToDraw(&paint, BUFFERED_DRAW, &are, &acf);
 
-    // srcRect refers to paint's first texture
-    if (NULL == paint.getTexture(0)) {
-        drawRect(paint, dstRect, -1, dstMatrix);
-        return;
-    }
-
-    GR_STATIC_ASSERT(!BATCH_RECT_TO_RECT || !GR_STATIC_RECT_VB);
-
-#if GR_STATIC_RECT_VB
-    GrDrawTarget* target = this->prepareToDraw(paint, kUnbuffered_DrawCategory);
-    GrDrawState* drawState = target->drawState();
-    GrVertexLayout layout = PaintStageVertexLayoutBits(paint, NULL);
-    GrDrawState::AutoViewMatrixRestore avmr(drawState);
-
-    GrMatrix m;
-
-    m.setAll(dstRect.width(), 0,                dstRect.fLeft,
-             0,               dstRect.height(), dstRect.fTop,
-             0,               0,                GrMatrix::I()[8]);
-    if (NULL != dstMatrix) {
-        m.postConcat(*dstMatrix);
-    }
-    drawState->preConcatViewMatrix(m);
-
-    // srcRect refers to first stage
-    int otherStageMask = paint.getActiveStageMask() & 
-                         (~(1 << GrPaint::kFirstTextureStage));
-    if (otherStageMask) {
-        drawState->preConcatSamplerMatrices(otherStageMask, m);
-    }
-
-    m.setAll(srcRect.width(), 0,                srcRect.fLeft,
-             0,               srcRect.height(), srcRect.fTop,
-             0,               0,                GrMatrix::I()[8]);
-    if (NULL != srcMatrix) {
-        m.postConcat(*srcMatrix);
-    }
-    drawState->sampler(GrPaint::kFirstTextureStage)->preConcatMatrix(m);
-
-    const GrVertexBuffer* sqVB = fGpu->getUnitSquareVertexBuffer();
-    if (NULL == sqVB) {
-        GrPrintf("Failed to create static rect vb.\n");
-        return;
-    }
-    target->setVertexSourceToBuffer(layout, sqVB);
-    target->drawNonIndexed(kTriangleFan_PrimitiveType, 0, 4);
-#else
-
-    GrDrawTarget* target;
-#if BATCH_RECT_TO_RECT
-    target = this->prepareToDraw(paint, kBuffered_DrawCategory);
-#else
-    target = this->prepareToDraw(paint, kUnbuffered_DrawCategory);
-#endif
-
-    const GrRect* srcRects[GrDrawState::kNumStages] = {NULL};
-    const GrMatrix* srcMatrices[GrDrawState::kNumStages] = {NULL};
-    srcRects[0] = &srcRect;
-    srcMatrices[0] = srcMatrix;
-
-    target->drawRect(dstRect, dstMatrix, 1, srcRects, srcMatrices);
-#endif
+    target->drawRect(dstRect, dstMatrix, &localRect, localMatrix);
 }
+
+namespace {
+
+extern const GrVertexAttrib gPosUVColorAttribs[] = {
+    {kVec2f_GrVertexAttribType,  0, kPosition_GrVertexAttribBinding },
+    {kVec2f_GrVertexAttribType,  sizeof(GrPoint), kLocalCoord_GrVertexAttribBinding },
+    {kVec4ub_GrVertexAttribType, 2*sizeof(GrPoint), kColor_GrVertexAttribBinding}
+};
+
+extern const GrVertexAttrib gPosColorAttribs[] = {
+    {kVec2f_GrVertexAttribType,  0, kPosition_GrVertexAttribBinding},
+    {kVec4ub_GrVertexAttribType, sizeof(GrPoint), kColor_GrVertexAttribBinding},
+};
+
+static void set_vertex_attributes(GrDrawState* drawState,
+                                  const GrPoint* texCoords,
+                                  const GrColor* colors,
+                                  int* colorOffset,
+                                  int* texOffset) {
+    *texOffset = -1;
+    *colorOffset = -1;
+
+    if (NULL != texCoords && NULL != colors) {
+        *texOffset = sizeof(GrPoint);
+        *colorOffset = 2*sizeof(GrPoint);
+        drawState->setVertexAttribs<gPosUVColorAttribs>(3);
+    } else if (NULL != texCoords) {
+        *texOffset = sizeof(GrPoint);
+        drawState->setVertexAttribs<gPosUVColorAttribs>(2);
+    } else if (NULL != colors) {
+        *colorOffset = sizeof(GrPoint);
+        drawState->setVertexAttribs<gPosColorAttribs>(2);
+    } else {
+        drawState->setVertexAttribs<gPosColorAttribs>(1);
+    }
+}
+
+};
 
 void GrContext::drawVertices(const GrPaint& paint,
                              GrPrimitiveType primitiveType,
@@ -1130,380 +944,320 @@ void GrContext::drawVertices(const GrPaint& paint,
 
     GrDrawTarget::AutoReleaseGeometry geo;
 
-    GrDrawTarget* target = this->prepareToDraw(paint, kUnbuffered_DrawCategory);
+    AutoRestoreEffects are;
+    AutoCheckFlush acf(this);
+    GrDrawTarget* target = this->prepareToDraw(&paint, BUFFERED_DRAW, &are, &acf);
 
-    bool hasTexCoords[GrPaint::kTotalStages] = {
-        NULL != texCoords,   // texCoordSrc provides explicit stage 0 coords
-        0                    // remaining stages use positions
-    };
+    GrDrawState* drawState = target->drawState();
 
-    GrVertexLayout layout = PaintStageVertexLayoutBits(paint, hasTexCoords);
+    int colorOffset = -1, texOffset = -1;
+    set_vertex_attributes(drawState, texCoords, colors, &colorOffset, &texOffset);
 
-    if (NULL != colors) {
-        layout |= GrDrawTarget::kColor_VertexLayoutBit;
-    }
-    int vertexSize = GrDrawTarget::VertexSize(layout);
-
+    size_t vertexSize = drawState->getVertexSize();
     if (sizeof(GrPoint) != vertexSize) {
-        if (!geo.set(target, layout, vertexCount, 0)) {
+        if (!geo.set(target, vertexCount, 0)) {
             GrPrintf("Failed to get space for vertices!\n");
             return;
         }
-        int texOffsets[GrDrawState::kMaxTexCoords];
-        int colorOffset;
-        GrDrawTarget::VertexSizeAndOffsetsByIdx(layout,
-                                                texOffsets,
-                                                &colorOffset,
-                                                NULL,
-                                                NULL);
         void* curVertex = geo.vertices();
 
         for (int i = 0; i < vertexCount; ++i) {
             *((GrPoint*)curVertex) = positions[i];
 
-            if (texOffsets[0] > 0) {
-                *(GrPoint*)((intptr_t)curVertex + texOffsets[0]) = texCoords[i];
+            if (texOffset >= 0) {
+                *(GrPoint*)((intptr_t)curVertex + texOffset) = texCoords[i];
             }
-            if (colorOffset > 0) {
+            if (colorOffset >= 0) {
                 *(GrColor*)((intptr_t)curVertex + colorOffset) = colors[i];
             }
             curVertex = (void*)((intptr_t)curVertex + vertexSize);
         }
     } else {
-        target->setVertexSourceToArray(layout, positions, vertexCount);
+        target->setVertexSourceToArray(positions, vertexCount);
     }
 
-    // we don't currently apply offscreen AA to this path. Need improved 
+    // we don't currently apply offscreen AA to this path. Need improved
     // management of GrDrawTarget's geometry to avoid copying points per-tile.
 
     if (NULL != indices) {
         target->setIndexSourceToArray(indices, indexCount);
         target->drawIndexed(primitiveType, 0, 0, vertexCount, indexCount);
+        target->resetIndexSource();
     } else {
         target->drawNonIndexed(primitiveType, 0, vertexCount);
     }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-#include "SkDraw.h"
-#include "SkRasterClip.h"
 
-namespace {
+void GrContext::drawRRect(const GrPaint& paint,
+                          const SkRRect& rect,
+                          const SkStrokeRec& stroke) {
+    if (rect.isEmpty()) {
+       return;
+    }
 
-SkPath::FillType gr_fill_to_sk_fill(GrPathFill fill) {
-    switch (fill) {
-        case kWinding_PathFill:
-            return SkPath::kWinding_FillType;
-        case kEvenOdd_PathFill:
-            return SkPath::kEvenOdd_FillType;
-        case kInverseWinding_PathFill:
-            return SkPath::kInverseWinding_FillType;
-        case kInverseEvenOdd_PathFill:
-            return SkPath::kInverseEvenOdd_FillType;
-        default:
-            GrCrash("Unexpected fill.");
-            return SkPath::kWinding_FillType;
+    AutoRestoreEffects are;
+    AutoCheckFlush acf(this);
+    GrDrawTarget* target = this->prepareToDraw(&paint, BUFFERED_DRAW, &are, &acf);
+
+    if (!fOvalRenderer->drawSimpleRRect(target, this, paint.isAntiAlias(), rect, stroke)) {
+        SkPath path;
+        path.addRRect(rect);
+        this->internalDrawPath(target, paint.isAntiAlias(), path, stroke);
     }
 }
 
-// gets device coord bounds of path (not considering the fill) and clip. The
-// path bounds will be a subset of the clip bounds. returns false if path bounds
-// would be empty.
-bool get_path_and_clip_bounds(const GrDrawTarget* target,
-                              const GrPath& path,
-                              const GrVec* translate,
-                              GrIRect* pathBounds,
-                              GrIRect* clipBounds) {
-    // compute bounds as intersection of rt size, clip, and path
-    const GrRenderTarget* rt = target->getDrawState().getRenderTarget();
-    if (NULL == rt) {
+///////////////////////////////////////////////////////////////////////////////
+
+void GrContext::drawOval(const GrPaint& paint,
+                         const SkRect& oval,
+                         const SkStrokeRec& stroke) {
+    if (oval.isEmpty()) {
+       return;
+    }
+
+    AutoRestoreEffects are;
+    AutoCheckFlush acf(this);
+    GrDrawTarget* target = this->prepareToDraw(&paint, BUFFERED_DRAW, &are, &acf);
+
+    if (!fOvalRenderer->drawOval(target, this, paint.isAntiAlias(), oval, stroke)) {
+        SkPath path;
+        path.addOval(oval);
+        this->internalDrawPath(target, paint.isAntiAlias(), path, stroke);
+    }
+}
+
+// Can 'path' be drawn as a pair of filled nested rectangles?
+static bool is_nested_rects(GrDrawTarget* target,
+                            const SkPath& path,
+                            const SkStrokeRec& stroke,
+                            SkRect rects[2],
+                            bool* useVertexCoverage) {
+    SkASSERT(stroke.isFillStyle());
+
+    if (path.isInverseFillType()) {
         return false;
     }
-    *pathBounds = GrIRect::MakeWH(rt->width(), rt->height());
-    const GrClip& clip = target->getClip();
-    if (clip.hasConservativeBounds()) {
-        clip.getConservativeBounds().roundOut(clipBounds);
-        if (!pathBounds->intersect(*clipBounds)) {
-            return false;
-        }
-    } else {
-        // pathBounds is currently the rt extent, set clip bounds to that rect.
-        *clipBounds = *pathBounds;
-    }
-    GrRect pathSBounds = path.getBounds();
-    if (!pathSBounds.isEmpty()) {
-        if (NULL != translate) {
-            pathSBounds.offset(*translate);
-        }
-        target->getDrawState().getViewMatrix().mapRect(&pathSBounds,
-                                                        pathSBounds);
-        GrIRect pathIBounds;
-        pathSBounds.roundOut(&pathIBounds);
-        if (!pathBounds->intersect(pathIBounds)) {
-            return false;
-        }
-    } else {
+
+    const GrDrawState& drawState = target->getDrawState();
+
+    // TODO: this restriction could be lifted if we were willing to apply
+    // the matrix to all the points individually rather than just to the rect
+    if (!drawState.getViewMatrix().preservesAxisAlignment()) {
         return false;
     }
+
+    *useVertexCoverage = false;
+    if (!target->getDrawState().canTweakAlphaForCoverage()) {
+        if (target->shouldDisableCoverageAAForBlend()) {
+            return false;
+        } else {
+            *useVertexCoverage = true;
+        }
+    }
+
+    SkPath::Direction dirs[2];
+    if (!path.isNestedRects(rects, dirs)) {
+        return false;
+    }
+
+    if (SkPath::kWinding_FillType == path.getFillType() && dirs[0] == dirs[1]) {
+        // The two rects need to be wound opposite to each other
+        return false;
+    }
+
+    // Right now, nested rects where the margin is not the same width
+    // all around do not render correctly
+    const SkScalar* outer = rects[0].asScalars();
+    const SkScalar* inner = rects[1].asScalars();
+
+    SkScalar margin = SkScalarAbs(outer[0] - inner[0]);
+    for (int i = 1; i < 4; ++i) {
+        SkScalar temp = SkScalarAbs(outer[i] - inner[i]);
+        if (!SkScalarNearlyEqual(margin, temp)) {
+            return false;
+        }
+    }
+
     return true;
 }
 
-/**
- * sw rasterizes path to A8 mask using the context's matrix and uploads to a 
- * scratch texture.
- */
-
-bool sw_draw_path_to_mask_texture(const GrPath& clientPath,
-                                  const GrIRect& pathDevBounds,
-                                  GrPathFill fill,
-                                  GrContext* context,
-                                  const GrPoint* translate,
-                                  GrAutoScratchTexture* tex) {
-    SkPaint paint;
-    SkPath tmpPath;
-    const SkPath* pathToDraw = &clientPath;
-    if (kHairLine_PathFill == fill) {
-        paint.setStyle(SkPaint::kStroke_Style);
-        paint.setStrokeWidth(SK_Scalar1);
-    } else {
-        paint.setStyle(SkPaint::kFill_Style);
-        SkPath::FillType skfill = gr_fill_to_sk_fill(fill);
-        if (skfill != pathToDraw->getFillType()) {
-            tmpPath = *pathToDraw;
-            tmpPath.setFillType(skfill);
-            pathToDraw = &tmpPath;
-        }
-    }
-    paint.setAntiAlias(true);
-    paint.setColor(SK_ColorWHITE);
-
-    GrMatrix matrix = context->getMatrix();
-    if (NULL != translate) {
-        matrix.postTranslate(translate->fX, translate->fY);
-    }
-
-    matrix.postTranslate(-pathDevBounds.fLeft * SK_Scalar1,
-                         -pathDevBounds.fTop * SK_Scalar1);
-    GrIRect bounds = GrIRect::MakeWH(pathDevBounds.width(),
-                                     pathDevBounds.height());
-
-    SkBitmap bm;
-    bm.setConfig(SkBitmap::kA8_Config, bounds.fRight, bounds.fBottom);
-    if (!bm.allocPixels()) {
-        return false;
-    }
-    sk_bzero(bm.getPixels(), bm.getSafeSize());
-
-    SkDraw  draw;
-    sk_bzero(&draw, sizeof(draw));
-    SkRasterClip rc(bounds);
-    draw.fRC    = &rc;
-    draw.fClip  = &rc.bwRgn();
-    draw.fMatrix = &matrix;
-    draw.fBitmap = &bm;
-    draw.drawPath(*pathToDraw, paint);
-
-    const GrTextureDesc desc = {
-        kNone_GrTextureFlags,
-        bounds.fRight,
-        bounds.fBottom,
-        kAlpha_8_GrPixelConfig,
-        {0} // samples
-    };
-
-    tex->set(context, desc);
-    GrTexture* texture = tex->texture();
-
-    if (NULL == texture) {
-        return false;
-    }
-    SkAutoLockPixels alp(bm);
-    texture->writePixels(0, 0, desc.fWidth, desc.fHeight, desc.fConfig,
-                         bm.getPixels(), bm.rowBytes());
-    return true;
-}
-
-void draw_around_inv_path(GrDrawTarget* target,
-                          GrDrawState::StageMask stageMask,
-                          const GrIRect& clipBounds,
-                          const GrIRect& pathBounds) {
-    GrDrawTarget::AutoDeviceCoordDraw adcd(target, stageMask);
-    GrRect rect;
-    if (clipBounds.fTop < pathBounds.fTop) {
-        rect.iset(clipBounds.fLeft, clipBounds.fTop, 
-                    clipBounds.fRight, pathBounds.fTop);
-        target->drawSimpleRect(rect, NULL, stageMask);
-    }
-    if (clipBounds.fLeft < pathBounds.fLeft) {
-        rect.iset(clipBounds.fLeft, pathBounds.fTop, 
-                    pathBounds.fLeft, pathBounds.fBottom);
-        target->drawSimpleRect(rect, NULL, stageMask);
-    }
-    if (clipBounds.fRight > pathBounds.fRight) {
-        rect.iset(pathBounds.fRight, pathBounds.fTop, 
-                    clipBounds.fRight, pathBounds.fBottom);
-        target->drawSimpleRect(rect, NULL, stageMask);
-    }
-    if (clipBounds.fBottom > pathBounds.fBottom) {
-        rect.iset(clipBounds.fLeft, pathBounds.fBottom, 
-                    clipBounds.fRight, clipBounds.fBottom);
-        target->drawSimpleRect(rect, NULL, stageMask);
-    }
-}
-
-}
-
-void GrContext::drawPath(const GrPaint& paint, const GrPath& path,
-                         GrPathFill fill, const GrPoint* translate) {
+void GrContext::drawPath(const GrPaint& paint, const SkPath& path, const SkStrokeRec& stroke) {
 
     if (path.isEmpty()) {
-       if (GrIsFillInverted(fill)) {
+       if (path.isInverseFillType()) {
            this->drawPaint(paint);
        }
        return;
     }
 
-    GrDrawTarget* target = this->prepareToDraw(paint, kUnbuffered_DrawCategory);
-    GrDrawState::StageMask stageMask = paint.getActiveStageMask();
+    // Note that internalDrawPath may sw-rasterize the path into a scratch texture.
+    // Scratch textures can be recycled after they are returned to the texture
+    // cache. This presents a potential hazard for buffered drawing. However,
+    // the writePixels that uploads to the scratch will perform a flush so we're
+    // OK.
+    AutoRestoreEffects are;
+    AutoCheckFlush acf(this);
+    GrDrawTarget* target = this->prepareToDraw(&paint, BUFFERED_DRAW, &are, &acf);
+    GrDrawState* drawState = target->drawState();
 
-    bool prAA = paint.fAntiAlias && !this->getRenderTarget()->isMultisampled();
+    bool useCoverageAA = paint.isAntiAlias() && !drawState->getRenderTarget()->isMultisampled();
+
+    if (useCoverageAA && stroke.getWidth() < 0 && !path.isConvex()) {
+        // Concave AA paths are expensive - try to avoid them for special cases
+        bool useVertexCoverage;
+        SkRect rects[2];
+
+        if (is_nested_rects(target, path, stroke, rects, &useVertexCoverage)) {
+            SkMatrix origViewMatrix = drawState->getViewMatrix();
+            GrDrawState::AutoViewMatrixRestore avmr;
+            if (!avmr.setIdentity(target->drawState())) {
+                return;
+            }
+
+            fAARectRenderer->fillAANestedRects(this->getGpu(), target,
+                                               rects,
+                                               origViewMatrix,
+                                               useVertexCoverage);
+            return;
+        }
+    }
+
+    SkRect ovalRect;
+    bool isOval = path.isOval(&ovalRect);
+
+    if (!isOval || path.isInverseFillType()
+        || !fOvalRenderer->drawOval(target, this, paint.isAntiAlias(), ovalRect, stroke)) {
+        this->internalDrawPath(target, paint.isAntiAlias(), path, stroke);
+    }
+}
+
+void GrContext::internalDrawPath(GrDrawTarget* target, bool useAA, const SkPath& path,
+                                 const SkStrokeRec& stroke) {
+    SkASSERT(!path.isEmpty());
 
     // An Assumption here is that path renderer would use some form of tweaking
     // the src color (either the input alpha or in the frag shader) to implement
     // aa. If we have some future driver-mojo path AA that can do the right
     // thing WRT to the blend then we'll need some query on the PR.
-    if (disable_coverage_aa_for_blend(target)) {
-#if GR_DEBUG
-        //GrPrintf("Turning off AA to correctly apply blend.\n");
-#endif
-        prAA = false;
-    }
+    bool useCoverageAA = useAA &&
+        !target->getDrawState().getRenderTarget()->isMultisampled() &&
+        !target->shouldDisableCoverageAAForBlend();
 
-    GrPathRenderer* pr = NULL;
-    if (prAA) {
-        pr = this->getPathRenderer(path, fill, target, true);
-        if (NULL == pr) {
-            GrAutoScratchTexture ast;
-            GrIRect pathBounds, clipBounds;
-            if (!get_path_and_clip_bounds(target, path, translate,
-                                          &pathBounds, &clipBounds)) {
-                return;
-            }
-            if (NULL == pr && sw_draw_path_to_mask_texture(path, pathBounds,
-                                                           fill, this,
-                                                           translate, &ast)) {
-                GrTexture* texture = ast.texture();
-                GrAssert(NULL != texture);
-                GrDrawTarget::AutoDeviceCoordDraw adcd(target, stageMask);
-                enum {
-                    kPathMaskStage = GrPaint::kTotalStages,
-                };
-                target->drawState()->setTexture(kPathMaskStage, texture);
-                target->drawState()->sampler(kPathMaskStage)->reset();
-                GrScalar w = GrIntToScalar(pathBounds.width());
-                GrScalar h = GrIntToScalar(pathBounds.height());
-                GrRect maskRect = GrRect::MakeWH(w / texture->width(),
-                                                 h / texture->height());
-                const GrRect* srcRects[GrDrawState::kNumStages] = {NULL};
-                srcRects[kPathMaskStage] = &maskRect;
-                stageMask |= 1 << kPathMaskStage;
-                GrRect dstRect = GrRect::MakeLTRB(
-                    SK_Scalar1* pathBounds.fLeft,
-                    SK_Scalar1* pathBounds.fTop,
-                    SK_Scalar1* pathBounds.fRight,
-                    SK_Scalar1* pathBounds.fBottom);
-                target->drawRect(dstRect, NULL, stageMask, srcRects, NULL);
-                target->drawState()->setTexture(kPathMaskStage, NULL);
-                if (GrIsFillInverted(fill)) {
-                    draw_around_inv_path(target, stageMask,
-                                         clipBounds, pathBounds);
+
+    GrPathRendererChain::DrawType type =
+        useCoverageAA ? GrPathRendererChain::kColorAntiAlias_DrawType :
+                           GrPathRendererChain::kColor_DrawType;
+
+    const SkPath* pathPtr = &path;
+    SkPath tmpPath;
+    SkStrokeRec strokeRec(stroke);
+
+    // Try a 1st time without stroking the path and without allowing the SW renderer
+    GrPathRenderer* pr = this->getPathRenderer(*pathPtr, strokeRec, target, false, type);
+
+    if (NULL == pr) {
+        if (!GrPathRenderer::IsStrokeHairlineOrEquivalent(strokeRec, this->getMatrix(), NULL)) {
+            // It didn't work the 1st time, so try again with the stroked path
+            if (strokeRec.applyToPath(&tmpPath, *pathPtr)) {
+                pathPtr = &tmpPath;
+                strokeRec.setFillStyle();
+                if (pathPtr->isEmpty()) {
+                    return;
                 }
-                return;
             }
         }
-    } else {
-        pr = this->getPathRenderer(path, fill, target, false);
+
+        // This time, allow SW renderer
+        pr = this->getPathRenderer(*pathPtr, strokeRec, target, true, type);
     }
 
     if (NULL == pr) {
-#if GR_DEBUG
+#ifdef SK_DEBUG
         GrPrintf("Unable to find path renderer compatible with path.\n");
 #endif
         return;
     }
 
-    pr->drawPath(path, fill, translate, target, stageMask, prAA);
+    pr->drawPath(*pathPtr, strokeRec, target, useCoverageAA);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
 void GrContext::flush(int flagsBitfield) {
+    if (NULL == fDrawBuffer) {
+        return;
+    }
+
     if (kDiscard_FlushBit & flagsBitfield) {
         fDrawBuffer->reset();
     } else {
-        this->flushDrawBuffer();
+        fDrawBuffer->flush();
     }
-    if (kForceCurrentRenderTarget_FlushBit & flagsBitfield) {
-        fGpu->forceRenderTargetFlush();
-    }
+    fFlushToReduceCacheSize = false;
 }
 
-void GrContext::flushText() {
-    if (kText_DrawCategory == fLastDrawCategory) {
-        flushDrawBuffer();
-    }
-}
-
-void GrContext::flushDrawBuffer() {
-#if BATCH_RECT_TO_RECT || DEFER_TEXT_RENDERING
-    if (fDrawBuffer) {
-        fDrawBuffer->playback(fGpu);
-        fDrawBuffer->reset();
-    }
-#endif
-}
-
-void GrContext::internalWriteTexturePixels(GrTexture* texture,
-                                           int left, int top,
-                                           int width, int height,
-                                           GrPixelConfig config,
-                                           const void* buffer,
-                                           size_t rowBytes,
-                                           uint32_t flags) {
+bool GrContext::writeTexturePixels(GrTexture* texture,
+                                   int left, int top, int width, int height,
+                                   GrPixelConfig config, const void* buffer, size_t rowBytes,
+                                   uint32_t flags) {
     SK_TRACE_EVENT0("GrContext::writeTexturePixels");
     ASSERT_OWNED_RESOURCE(texture);
+
+    if ((kUnpremul_PixelOpsFlag & flags) || !fGpu->canWriteTexturePixels(texture, config)) {
+        if (NULL != texture->asRenderTarget()) {
+            return this->writeRenderTargetPixels(texture->asRenderTarget(),
+                                                 left, top, width, height,
+                                                 config, buffer, rowBytes, flags);
+        } else {
+            return false;
+        }
+    }
 
     if (!(kDontFlush_PixelOpsFlag & flags)) {
         this->flush();
     }
-    // TODO: use scratch texture to perform conversion
-    if (GrPixelConfigIsUnpremultiplied(texture->config()) !=
-        GrPixelConfigIsUnpremultiplied(config)) {
-        return;
-    }
 
-    fGpu->writeTexturePixels(texture, left, top, width, height, 
-                             config, buffer, rowBytes);
+    return fGpu->writeTexturePixels(texture, left, top, width, height,
+                                    config, buffer, rowBytes);
 }
 
-bool GrContext::internalReadTexturePixels(GrTexture* texture,
-                                          int left, int top,
-                                          int width, int height,
-                                          GrPixelConfig config,
-                                          void* buffer,
-                                          size_t rowBytes,
-                                          uint32_t flags) {
+bool GrContext::readTexturePixels(GrTexture* texture,
+                                  int left, int top, int width, int height,
+                                  GrPixelConfig config, void* buffer, size_t rowBytes,
+                                  uint32_t flags) {
     SK_TRACE_EVENT0("GrContext::readTexturePixels");
     ASSERT_OWNED_RESOURCE(texture);
 
-    // TODO: code read pixels for textures that aren't also rendertargets
     GrRenderTarget* target = texture->asRenderTarget();
     if (NULL != target) {
-        return this->internalReadRenderTargetPixels(target,
-                                                    left, top, width, height,
-                                                    config, buffer, rowBytes,
-                                                    flags);
+        return this->readRenderTargetPixels(target,
+                                            left, top, width, height,
+                                            config, buffer, rowBytes,
+                                            flags);
     } else {
+        // TODO: make this more efficient for cases where we're reading the entire
+        //       texture, i.e., use GetTexImage() instead
+
+        // create scratch rendertarget and read from that
+        GrAutoScratchTexture ast;
+        GrTextureDesc desc;
+        desc.fFlags = kRenderTarget_GrTextureFlagBit;
+        desc.fWidth = width;
+        desc.fHeight = height;
+        desc.fConfig = config;
+        desc.fOrigin = kTopLeft_GrSurfaceOrigin;
+        ast.set(this, desc, kExact_ScratchTexMatch);
+        GrTexture* dst = ast.texture();
+        if (NULL != dst && NULL != (target = dst->asRenderTarget())) {
+            this->copyTexture(texture, target, NULL);
+            return this->readRenderTargetPixels(target,
+                                                left, top, width, height,
+                                                config, buffer, rowBytes,
+                                                flags);
+        }
+
         return false;
     }
 }
@@ -1517,38 +1271,57 @@ namespace {
  * if the GrPixelConfig has no equivalent Config8888.
  */
 bool grconfig_to_config8888(GrPixelConfig config,
+                            bool unpremul,
                             SkCanvas::Config8888* config8888) {
     switch (config) {
-        case kRGBA_8888_PM_GrPixelConfig:
-            *config8888 = SkCanvas::kRGBA_Premul_Config8888;
+        case kRGBA_8888_GrPixelConfig:
+            if (unpremul) {
+                *config8888 = SkCanvas::kRGBA_Unpremul_Config8888;
+            } else {
+                *config8888 = SkCanvas::kRGBA_Premul_Config8888;
+            }
             return true;
-        case kRGBA_8888_UPM_GrPixelConfig:
-            *config8888 = SkCanvas::kRGBA_Unpremul_Config8888;
-            return true;
-        case kBGRA_8888_PM_GrPixelConfig:
-            *config8888 = SkCanvas::kBGRA_Premul_Config8888;
-            return true;
-        case kBGRA_8888_UPM_GrPixelConfig:
-            *config8888 = SkCanvas::kBGRA_Unpremul_Config8888;
+        case kBGRA_8888_GrPixelConfig:
+            if (unpremul) {
+                *config8888 = SkCanvas::kBGRA_Unpremul_Config8888;
+            } else {
+                *config8888 = SkCanvas::kBGRA_Premul_Config8888;
+            }
             return true;
         default:
             return false;
     }
 }
+
+// It returns a configuration with where the byte position of the R & B components are swapped in
+// relation to the input config. This should only be called with the result of
+// grconfig_to_config8888 as it will fail for other configs.
+SkCanvas::Config8888 swap_config8888_red_and_blue(SkCanvas::Config8888 config8888) {
+    switch (config8888) {
+        case SkCanvas::kBGRA_Premul_Config8888:
+            return SkCanvas::kRGBA_Premul_Config8888;
+        case SkCanvas::kBGRA_Unpremul_Config8888:
+            return SkCanvas::kRGBA_Unpremul_Config8888;
+        case SkCanvas::kRGBA_Premul_Config8888:
+            return SkCanvas::kBGRA_Premul_Config8888;
+        case SkCanvas::kRGBA_Unpremul_Config8888:
+            return SkCanvas::kBGRA_Unpremul_Config8888;
+        default:
+            GrCrash("Unexpected input");
+            return SkCanvas::kBGRA_Unpremul_Config8888;;
+    }
+}
 }
 
-bool GrContext::internalReadRenderTargetPixels(GrRenderTarget* target,
-                                               int left, int top,
-                                               int width, int height,
-                                               GrPixelConfig config,
-                                               void* buffer,
-                                               size_t rowBytes,
-                                               uint32_t flags) {
+bool GrContext::readRenderTargetPixels(GrRenderTarget* target,
+                                       int left, int top, int width, int height,
+                                       GrPixelConfig dstConfig, void* buffer, size_t rowBytes,
+                                       uint32_t flags) {
     SK_TRACE_EVENT0("GrContext::readRenderTargetPixels");
     ASSERT_OWNED_RESOURCE(target);
 
-    if (NULL == target) { 
-        target = fGpu->drawState()->getRenderTarget();
+    if (NULL == target) {
+        target = fRenderTarget.get();
         if (NULL == target) {
             return false;
         }
@@ -1558,69 +1331,53 @@ bool GrContext::internalReadRenderTargetPixels(GrRenderTarget* target,
         this->flush();
     }
 
-    if (!GrPixelConfigIsUnpremultiplied(target->config()) &&
-        GrPixelConfigIsUnpremultiplied(config) &&
-        !fGpu->canPreserveReadWriteUnpremulPixels()) {
-        SkCanvas::Config8888 srcConfig8888, dstConfig8888;
-        if (!grconfig_to_config8888(target->config(), &srcConfig8888) ||
-            !grconfig_to_config8888(config, &dstConfig8888)) {
-            return false;
-        }
-        // do read back using target's own config
-        this->internalReadRenderTargetPixels(target,
-                                             left, top,
-                                             width, height,
-                                             target->config(),
-                                             buffer, rowBytes,
-                                             kDontFlush_PixelOpsFlag);
-        // sw convert the pixels to unpremul config
-        uint32_t* pixels = reinterpret_cast<uint32_t*>(buffer);
-        SkConvertConfig8888Pixels(pixels, rowBytes, dstConfig8888,
-                                  pixels, rowBytes, srcConfig8888,
-                                  width, height);
-        return true;
+    // Determine which conversions have to be applied: flipY, swapRAnd, and/or unpremul.
+
+    // If fGpu->readPixels would incur a y-flip cost then we will read the pixels upside down. We'll
+    // either do the flipY by drawing into a scratch with a matrix or on the cpu after the read.
+    bool flipY = fGpu->readPixelsWillPayForYFlip(target, left, top,
+                                                 width, height, dstConfig,
+                                                 rowBytes);
+    // We ignore the preferred config if it is different than our config unless it is an R/B swap.
+    // In that case we'll perform an R and B swap while drawing to a scratch texture of the swapped
+    // config. Then we will call readPixels on the scratch with the swapped config. The swaps during
+    // the draw cancels out the fact that we call readPixels with a config that is R/B swapped from
+    // dstConfig.
+    GrPixelConfig readConfig = dstConfig;
+    bool swapRAndB = false;
+    if (GrPixelConfigSwapRAndB(dstConfig) ==
+        fGpu->preferredReadPixelsConfig(dstConfig, target->config())) {
+        readConfig = GrPixelConfigSwapRAndB(readConfig);
+        swapRAndB = true;
     }
 
-    GrTexture* src = target->asTexture();
-    bool swapRAndB = NULL != src &&
-                     fGpu->preferredReadPixelsConfig(config) ==
-                     GrPixelConfigSwapRAndB(config);
+    bool unpremul = SkToBool(kUnpremul_PixelOpsFlag & flags);
 
-    bool flipY = NULL != src &&
-                 fGpu->readPixelsWillPayForYFlip(target, left, top,
-                                                 width, height, config,
-                                                 rowBytes);
-    bool alphaConversion = (!GrPixelConfigIsUnpremultiplied(target->config()) &&
-                             GrPixelConfigIsUnpremultiplied(config));
-
-    if (NULL == src && alphaConversion) {
-        // we should fallback to cpu conversion here. This could happen when
-        // we were given an external render target by the client that is not
-        // also a texture (e.g. FBO 0 in GL)
+    if (unpremul && !GrPixelConfigIs8888(dstConfig)) {
+        // The unpremul flag is only allowed for these two configs.
         return false;
     }
-    // we draw to a scratch texture if any of these conversion are applied
-    GrAutoScratchTexture ast;
-    if (flipY || swapRAndB || alphaConversion) {
-        GrAssert(NULL != src);
-        if (swapRAndB) {
-            config = GrPixelConfigSwapRAndB(config);
-            GrAssert(kUnknown_GrPixelConfig != config);
-        }
-        // Make the scratch a render target because we don't have a robust
-        // readTexturePixels as of yet (it calls this function).
-        const GrTextureDesc desc = {
-            kRenderTarget_GrTextureFlagBit,
-            width, height,
-            config,
-            {0}, // samples
-        };
 
-        // When a full readback is faster than a partial we could always make
-        // the scratch exactly match the passed rect. However, if we see many
-        // different size rectangles we will trash our texture cache and pay the
-        // cost of creating and destroying many textures. So, we only request
-        // an exact match when the caller is reading an entire RT.
+    // If the src is a texture and we would have to do conversions after read pixels, we instead
+    // do the conversions by drawing the src to a scratch texture. If we handle any of the
+    // conversions in the draw we set the corresponding bool to false so that we don't reapply it
+    // on the read back pixels.
+    GrTexture* src = target->asTexture();
+    GrAutoScratchTexture ast;
+    if (NULL != src && (swapRAndB || unpremul || flipY)) {
+        // Make the scratch a render target because we don't have a robust readTexturePixels as of
+        // yet. It calls this function.
+        GrTextureDesc desc;
+        desc.fFlags = kRenderTarget_GrTextureFlagBit;
+        desc.fWidth = width;
+        desc.fHeight = height;
+        desc.fConfig = readConfig;
+        desc.fOrigin = kTopLeft_GrSurfaceOrigin;
+
+        // When a full read back is faster than a partial we could always make the scratch exactly
+        // match the passed rect. However, if we see many different size rectangles we will trash
+        // our texture cache and pay the cost of creating and destroying many textures. So, we only
+        // request an exact match when the caller is reading an entire RT.
         ScratchTexMatch match = kApprox_ScratchTexMatch;
         if (0 == left &&
             0 == top &&
@@ -1631,42 +1388,78 @@ bool GrContext::internalReadRenderTargetPixels(GrRenderTarget* target,
         }
         ast.set(this, desc, match);
         GrTexture* texture = ast.texture();
-        if (!texture) {
-            return false;
-        }
-        target = texture->asRenderTarget();
-        GrAssert(NULL != target);
+        if (texture) {
+            // compute a matrix to perform the draw
+            SkMatrix textureMatrix;
+            textureMatrix.setTranslate(SK_Scalar1 *left, SK_Scalar1 *top);
+            textureMatrix.postIDiv(src->width(), src->height());
 
-        GrDrawTarget::AutoStateRestore asr(fGpu);
-        GrDrawState* drawState = fGpu->drawState();
-        drawState->reset();
-        drawState->setRenderTarget(target);
+            SkAutoTUnref<const GrEffectRef> effect;
+            if (unpremul) {
+                effect.reset(this->createPMToUPMEffect(src, swapRAndB, textureMatrix));
+                if (NULL != effect) {
+                    unpremul = false; // we no longer need to do this on CPU after the read back.
+                }
+            }
+            // If we failed to create a PM->UPM effect and have no other conversions to perform then
+            // there is no longer any point to using the scratch.
+            if (NULL != effect || flipY || swapRAndB) {
+                if (!effect) {
+                    effect.reset(GrConfigConversionEffect::Create(
+                                                    src,
+                                                    swapRAndB,
+                                                    GrConfigConversionEffect::kNone_PMConversion,
+                                                    textureMatrix));
+                }
+                swapRAndB = false; // we will handle the swap in the draw.
 
-        GrMatrix matrix;
-        if (flipY) {
-            matrix.setTranslate(SK_Scalar1 * left,
-                                SK_Scalar1 * (top + height));
-            matrix.set(GrMatrix::kMScaleY, -GR_Scalar1);
-        } else {
-            matrix.setTranslate(SK_Scalar1 *left, SK_Scalar1 *top);
+                // We protect the existing geometry here since it may not be
+                // clear to the caller that a draw operation (i.e., drawSimpleRect)
+                // can be invoked in this method
+                GrDrawTarget::AutoGeometryAndStatePush agasp(fGpu, GrDrawTarget::kReset_ASRInit);
+                GrDrawState* drawState = fGpu->drawState();
+                SkASSERT(effect);
+                drawState->addColorEffect(effect);
+
+                drawState->setRenderTarget(texture->asRenderTarget());
+                SkRect rect = SkRect::MakeWH(SkIntToScalar(width), SkIntToScalar(height));
+                fGpu->drawSimpleRect(rect, NULL);
+                // we want to read back from the scratch's origin
+                left = 0;
+                top = 0;
+                target = texture->asRenderTarget();
+            }
         }
-        matrix.postIDiv(src->width(), src->height());
-        drawState->sampler(0)->reset(matrix);
-        drawState->sampler(0)->setRAndBSwap(swapRAndB);
-        drawState->setTexture(0, src);
-        GrRect rect;
-        rect.setXYWH(0, 0, SK_Scalar1 * width, SK_Scalar1 * height);
-        fGpu->drawSimpleRect(rect, NULL, 0x1);
-        left = 0;
-        top = 0;
     }
-    return fGpu->readPixels(target,
-                            left, top, width, height,
-                            config, buffer, rowBytes, flipY);
+    if (!fGpu->readPixels(target,
+                          left, top, width, height,
+                          readConfig, buffer, rowBytes)) {
+        return false;
+    }
+    // Perform any conversions we weren't able to perform using a scratch texture.
+    if (unpremul || swapRAndB) {
+        // These are initialized to suppress a warning
+        SkCanvas::Config8888 srcC8888 = SkCanvas::kNative_Premul_Config8888;
+        SkCanvas::Config8888 dstC8888 = SkCanvas::kNative_Premul_Config8888;
+
+        SkDEBUGCODE(bool c8888IsValid =) grconfig_to_config8888(dstConfig, false, &srcC8888);
+        grconfig_to_config8888(dstConfig, unpremul, &dstC8888);
+
+        if (swapRAndB) {
+            SkASSERT(c8888IsValid); // we should only do r/b swap on 8888 configs
+            srcC8888 = swap_config8888_red_and_blue(srcC8888);
+        }
+        SkASSERT(c8888IsValid);
+        uint32_t* b32 = reinterpret_cast<uint32_t*>(buffer);
+        SkConvertConfig8888Pixels(b32, rowBytes, dstC8888,
+                                  b32, rowBytes, srcC8888,
+                                  width, height);
+    }
+    return true;
 }
 
 void GrContext::resolveRenderTarget(GrRenderTarget* target) {
-    GrAssert(target);
+    SkASSERT(target);
     ASSERT_OWNED_RESOURCE(target);
     // In the future we may track whether there are any pending draws to this
     // target. We don't today so we always perform a flush. We don't promise
@@ -1675,382 +1468,331 @@ void GrContext::resolveRenderTarget(GrRenderTarget* target) {
     fGpu->resolveRenderTarget(target);
 }
 
-void GrContext::copyTexture(GrTexture* src, GrRenderTarget* dst) {
+void GrContext::copyTexture(GrTexture* src, GrRenderTarget* dst, const SkIPoint* topLeft) {
     if (NULL == src || NULL == dst) {
         return;
     }
     ASSERT_OWNED_RESOURCE(src);
 
-    GrDrawTarget::AutoStateRestore asr(fGpu);
+    // Writes pending to the source texture are not tracked, so a flush
+    // is required to ensure that the copy captures the most recent contents
+    // of the source texture. See similar behavior in
+    // GrContext::resolveRenderTarget.
+    this->flush();
+
+    GrDrawTarget::AutoStateRestore asr(fGpu, GrDrawTarget::kReset_ASRInit);
     GrDrawState* drawState = fGpu->drawState();
-    drawState->reset();
     drawState->setRenderTarget(dst);
-    GrMatrix sampleM;
+    SkMatrix sampleM;
     sampleM.setIDiv(src->width(), src->height());
-    drawState->setTexture(0, src);
-    drawState->sampler(0)->reset(sampleM);
-    SkRect rect = SkRect::MakeXYWH(0, 0,
-                                   SK_Scalar1 * src->width(),
-                                   SK_Scalar1 * src->height());
-    fGpu->drawSimpleRect(rect, NULL, 1 << 0);
+    SkIRect srcRect = SkIRect::MakeWH(dst->width(), dst->height());
+    if (NULL != topLeft) {
+        srcRect.offset(*topLeft);
+    }
+    SkIRect srcBounds = SkIRect::MakeWH(src->width(), src->height());
+    if (!srcRect.intersect(srcBounds)) {
+        return;
+    }
+    sampleM.preTranslate(SkIntToScalar(srcRect.fLeft), SkIntToScalar(srcRect.fTop));
+    drawState->addColorTextureEffect(src, sampleM);
+    SkRect dstR = SkRect::MakeWH(SkIntToScalar(srcRect.width()), SkIntToScalar(srcRect.height()));
+    fGpu->drawSimpleRect(dstR, NULL);
 }
 
-void GrContext::internalWriteRenderTargetPixels(GrRenderTarget* target, 
-                                                int left, int top,
-                                                int width, int height,
-                                                GrPixelConfig config,
-                                                const void* buffer,
-                                                size_t rowBytes,
-                                                uint32_t flags) {
+bool GrContext::writeRenderTargetPixels(GrRenderTarget* target,
+                                        int left, int top, int width, int height,
+                                        GrPixelConfig srcConfig,
+                                        const void* buffer,
+                                        size_t rowBytes,
+                                        uint32_t flags) {
     SK_TRACE_EVENT0("GrContext::writeRenderTargetPixels");
     ASSERT_OWNED_RESOURCE(target);
 
-    if (NULL == target) { 
-        target = fGpu->drawState()->getRenderTarget();
+    if (NULL == target) {
+        target = fRenderTarget.get();
         if (NULL == target) {
-            return;
+            return false;
         }
     }
 
-    // TODO: when underlying api has a direct way to do this we should use it
-    // (e.g. glDrawPixels on desktop GL).
+    // TODO: when underlying api has a direct way to do this we should use it (e.g. glDrawPixels on
+    // desktop GL).
 
-    // If the RT is also a texture and we don't have to do PM/UPM conversion
-    // then take the texture path, which we expect to be at least as fast or
-    // faster since it doesn't use an intermediate texture as we do below.
-    
-#if !GR_MAC_BUILD
-    // At least some drivers on the Mac get confused when glTexImage2D is called
-    // on a texture attached to an FBO. The FBO still sees the old image. TODO:
-    // determine what OS versions and/or HW is affected.
-    if (NULL != target->asTexture() &&
-        GrPixelConfigIsUnpremultiplied(target->config()) ==
-        GrPixelConfigIsUnpremultiplied(config)) {
+    // We will always call some form of writeTexturePixels and we will pass our flags on to it.
+    // Thus, we don't perform a flush here since that call will do it (if the kNoFlush flag isn't
+    // set.)
 
-        this->internalWriteTexturePixels(target->asTexture(),
-                                         left, top, width, height,
-                                         config, buffer, rowBytes, flags);
-        return;
+    // If the RT is also a texture and we don't have to premultiply then take the texture path.
+    // We expect to be at least as fast or faster since it doesn't use an intermediate texture as
+    // we do below.
+
+#if !defined(SK_BUILD_FOR_MAC)
+    // At least some drivers on the Mac get confused when glTexImage2D is called on a texture
+    // attached to an FBO. The FBO still sees the old image. TODO: determine what OS versions and/or
+    // HW is affected.
+    if (NULL != target->asTexture() && !(kUnpremul_PixelOpsFlag & flags) &&
+        fGpu->canWriteTexturePixels(target->asTexture(), srcConfig)) {
+        return this->writeTexturePixels(target->asTexture(),
+                                        left, top, width, height,
+                                        srcConfig, buffer, rowBytes, flags);
     }
 #endif
-    if (!GrPixelConfigIsUnpremultiplied(target->config()) &&
-        GrPixelConfigIsUnpremultiplied(config) &&
-        !fGpu->canPreserveReadWriteUnpremulPixels()) {
-        SkCanvas::Config8888 srcConfig8888, dstConfig8888;
-        if (!grconfig_to_config8888(config, &srcConfig8888) ||
-            !grconfig_to_config8888(target->config(), &dstConfig8888)) {
-            return;
-        }
-        // allocate a tmp buffer and sw convert the pixels to premul
-        SkAutoSTMalloc<128 * 128, uint32_t> tmpPixels(width * height);
-        const uint32_t* src = reinterpret_cast<const uint32_t*>(buffer);
-        SkConvertConfig8888Pixels(tmpPixels.get(), 4 * width, dstConfig8888,
-                                  src, rowBytes, srcConfig8888,
-                                  width, height);
-        // upload the already premul pixels
-        this->internalWriteRenderTargetPixels(target,
-                                             left, top,
-                                             width, height,
-                                             target->config(),
-                                             tmpPixels, 4 * width, flags);
-        return;
+
+    // We ignore the preferred config unless it is a R/B swap of the src config. In that case
+    // we will upload the original src data to a scratch texture but we will spoof it as the swapped
+    // config. This scratch will then have R and B swapped. We correct for this by swapping again
+    // when drawing the scratch to the dst using a conversion effect.
+    bool swapRAndB = false;
+    GrPixelConfig writeConfig = srcConfig;
+    if (GrPixelConfigSwapRAndB(srcConfig) ==
+        fGpu->preferredWritePixelsConfig(srcConfig, target->config())) {
+        writeConfig = GrPixelConfigSwapRAndB(srcConfig);
+        swapRAndB = true;
     }
 
-    bool swapRAndB = fGpu->preferredReadPixelsConfig(config) ==
-                     GrPixelConfigSwapRAndB(config);
-    if (swapRAndB) {
-        config = GrPixelConfigSwapRAndB(config);
-    }
-
-    const GrTextureDesc desc = {
-        kNone_GrTextureFlags, width, height, config, {0}
-    };
+    GrTextureDesc desc;
+    desc.fWidth = width;
+    desc.fHeight = height;
+    desc.fConfig = writeConfig;
     GrAutoScratchTexture ast(this, desc);
     GrTexture* texture = ast.texture();
     if (NULL == texture) {
-        return;
+        return false;
     }
-    this->internalWriteTexturePixels(texture, 0, 0, width, height,
-                                     config, buffer, rowBytes, flags);
 
-    GrDrawTarget::AutoStateRestore  asr(fGpu);
+    SkAutoTUnref<const GrEffectRef> effect;
+    SkMatrix textureMatrix;
+    textureMatrix.setIDiv(texture->width(), texture->height());
+
+    // allocate a tmp buffer and sw convert the pixels to premul
+    SkAutoSTMalloc<128 * 128, uint32_t> tmpPixels(0);
+
+    if (kUnpremul_PixelOpsFlag & flags) {
+        if (!GrPixelConfigIs8888(srcConfig)) {
+            return false;
+        }
+        effect.reset(this->createUPMToPMEffect(texture, swapRAndB, textureMatrix));
+        // handle the unpremul step on the CPU if we couldn't create an effect to do it.
+        if (NULL == effect) {
+            SkCanvas::Config8888 srcConfig8888, dstConfig8888;
+            SkDEBUGCODE(bool success = )
+            grconfig_to_config8888(srcConfig, true, &srcConfig8888);
+            SkASSERT(success);
+            SkDEBUGCODE(success = )
+            grconfig_to_config8888(srcConfig, false, &dstConfig8888);
+            SkASSERT(success);
+            const uint32_t* src = reinterpret_cast<const uint32_t*>(buffer);
+            tmpPixels.reset(width * height);
+            SkConvertConfig8888Pixels(tmpPixels.get(), 4 * width, dstConfig8888,
+                                      src, rowBytes, srcConfig8888,
+                                      width, height);
+            buffer = tmpPixels.get();
+            rowBytes = 4 * width;
+        }
+    }
+    if (NULL == effect) {
+        effect.reset(GrConfigConversionEffect::Create(texture,
+                                                      swapRAndB,
+                                                      GrConfigConversionEffect::kNone_PMConversion,
+                                                      textureMatrix));
+    }
+
+    if (!this->writeTexturePixels(texture,
+                                  0, 0, width, height,
+                                  writeConfig, buffer, rowBytes,
+                                  flags & ~kUnpremul_PixelOpsFlag)) {
+        return false;
+    }
+
+    // writeRenderTargetPixels can be called in the midst of drawing another
+    // object (e.g., when uploading a SW path rendering to the gpu while
+    // drawing a rect) so preserve the current geometry.
+    SkMatrix matrix;
+    matrix.setTranslate(SkIntToScalar(left), SkIntToScalar(top));
+    GrDrawTarget::AutoGeometryAndStatePush agasp(fGpu, GrDrawTarget::kReset_ASRInit, &matrix);
     GrDrawState* drawState = fGpu->drawState();
-    drawState->reset();
+    SkASSERT(effect);
+    drawState->addColorEffect(effect);
 
-    GrMatrix matrix;
-    matrix.setTranslate(GrIntToScalar(left), GrIntToScalar(top));
-    drawState->setViewMatrix(matrix);
     drawState->setRenderTarget(target);
-    drawState->setTexture(0, texture);
 
-    matrix.setIDiv(texture->width(), texture->height());
-    drawState->sampler(0)->reset(GrSamplerState::kClamp_WrapMode,
-                                 GrSamplerState::kNearest_Filter,
-                                 matrix);
-    drawState->sampler(0)->setRAndBSwap(swapRAndB);
-
-    GrVertexLayout layout = GrDrawTarget::StagePosAsTexCoordVertexLayoutBit(0);
-    static const int VCOUNT = 4;
-    // TODO: Use GrGpu::drawRect here
-    GrDrawTarget::AutoReleaseGeometry geo(fGpu, layout, VCOUNT, 0);
-    if (!geo.succeeded()) {
-        GrPrintf("Failed to get space for vertices!\n");
-        return;
-    }
-    ((GrPoint*)geo.vertices())->setIRectFan(0, 0, width, height);
-    fGpu->drawNonIndexed(kTriangleFan_PrimitiveType, 0, VCOUNT);
+    fGpu->drawSimpleRect(SkRect::MakeWH(SkIntToScalar(width), SkIntToScalar(height)), NULL);
+    return true;
 }
 ////////////////////////////////////////////////////////////////////////////////
 
-void GrContext::setPaint(const GrPaint& paint, GrDrawTarget* target) {
-    GrDrawState* drawState = target->drawState();
+GrDrawTarget* GrContext::prepareToDraw(const GrPaint* paint,
+                                       BufferedDraw buffered,
+                                       AutoRestoreEffects* are,
+                                       AutoCheckFlush* acf) {
+    // All users of this draw state should be freeing up all effects when they're done.
+    // Otherwise effects that own resources may keep those resources alive indefinitely.
+    SkASSERT(0 == fDrawState->numColorStages() && 0 == fDrawState->numCoverageStages());
 
-    for (int i = 0; i < GrPaint::kMaxTextures; ++i) {
-        int s = i + GrPaint::kFirstTextureStage;
-        drawState->setTexture(s, paint.getTexture(i));
-        ASSERT_OWNED_RESOURCE(paint.getTexture(i));
-        if (paint.getTexture(i)) {
-            *drawState->sampler(s) = paint.getTextureSampler(i);
+    if (kNo_BufferedDraw == buffered && kYes_BufferedDraw == fLastDrawWasBuffered) {
+        fDrawBuffer->flush();
+        fLastDrawWasBuffered = kNo_BufferedDraw;
+    }
+    ASSERT_OWNED_RESOURCE(fRenderTarget.get());
+    if (NULL != paint) {
+        SkASSERT(NULL != are);
+        SkASSERT(NULL != acf);
+        are->set(fDrawState);
+        fDrawState->setFromPaint(*paint, fViewMatrix, fRenderTarget.get());
+#if GR_DEBUG_PARTIAL_COVERAGE_CHECK
+        if ((paint->hasMask() || 0xff != paint->fCoverage) &&
+            !fGpu->canApplyCoverage()) {
+            GrPrintf("Partial pixel coverage will be incorrectly blended.\n");
         }
-    }
-
-    drawState->setFirstCoverageStage(GrPaint::kFirstMaskStage);
-
-    for (int i = 0; i < GrPaint::kMaxMasks; ++i) {
-        int s = i + GrPaint::kFirstMaskStage;
-        drawState->setTexture(s, paint.getMask(i));
-        ASSERT_OWNED_RESOURCE(paint.getMask(i));
-        if (paint.getMask(i)) {
-            *drawState->sampler(s) = paint.getMaskSampler(i);
-        }
-    }
-
-    drawState->setColor(paint.fColor);
-
-    if (paint.fDither) {
-        drawState->enableState(GrDrawState::kDither_StateBit);
-    } else {
-        drawState->disableState(GrDrawState::kDither_StateBit);
-    }
-    if (paint.fAntiAlias) {
-        drawState->enableState(GrDrawState::kHWAntialias_StateBit);
-    } else {
-        drawState->disableState(GrDrawState::kHWAntialias_StateBit);
-    }
-    if (paint.fColorMatrixEnabled) {
-        drawState->enableState(GrDrawState::kColorMatrix_StateBit);
-    } else {
-        drawState->disableState(GrDrawState::kColorMatrix_StateBit);
-    }
-    drawState->setBlendFunc(paint.fSrcBlendCoeff, paint.fDstBlendCoeff);
-    drawState->setColorFilter(paint.fColorFilterColor, paint.fColorFilterXfermode);
-    drawState->setColorMatrix(paint.fColorMatrix);
-    drawState->setCoverage(paint.fCoverage);
-
-    if (paint.getActiveMaskStageMask() && !target->canApplyCoverage()) {
-        GrPrintf("Partial pixel coverage will be incorrectly blended.\n");
-    }
-}
-
-GrDrawTarget* GrContext::prepareToDraw(const GrPaint& paint,
-                                       DrawCategory category) {
-    if (category != fLastDrawCategory) {
-        flushDrawBuffer();
-        fLastDrawCategory = category;
-    }
-    this->setPaint(paint, fGpu);
-    GrDrawTarget* target = fGpu;
-    switch (category) {
-    case kText_DrawCategory:
-#if DEFER_TEXT_RENDERING
-        target = fDrawBuffer;
-        fDrawBuffer->initializeDrawStateAndClip(*fGpu);
-#else
-        target = fGpu;
 #endif
-        break;
-    case kUnbuffered_DrawCategory:
-        target = fGpu;
-        break;
-    case kBuffered_DrawCategory:
-        target = fDrawBuffer;
-        fDrawBuffer->initializeDrawStateAndClip(*fGpu);
-        break;
+    } else {
+        fDrawState->reset(fViewMatrix);
+        fDrawState->setRenderTarget(fRenderTarget.get());
     }
+    GrDrawTarget* target;
+    if (kYes_BufferedDraw == buffered) {
+        fLastDrawWasBuffered = kYes_BufferedDraw;
+        target = fDrawBuffer;
+    } else {
+        SkASSERT(kNo_BufferedDraw == buffered);
+        fLastDrawWasBuffered = kNo_BufferedDraw;
+        target = fGpu;
+    }
+    fDrawState->setState(GrDrawState::kClip_StateBit, NULL != fClip &&
+                                                     !fClip->fClipStack->isWideOpen());
+    target->setClip(fClip);
+    SkASSERT(fDrawState == target->drawState());
     return target;
 }
 
-GrPathRenderer* GrContext::getPathRenderer(const GrPath& path,
-                                           GrPathFill fill,
+/*
+ * This method finds a path renderer that can draw the specified path on
+ * the provided target.
+ * Due to its expense, the software path renderer has split out so it can
+ * can be individually allowed/disallowed via the "allowSW" boolean.
+ */
+GrPathRenderer* GrContext::getPathRenderer(const SkPath& path,
+                                           const SkStrokeRec& stroke,
                                            const GrDrawTarget* target,
-                                           bool antiAlias) {
+                                           bool allowSW,
+                                           GrPathRendererChain::DrawType drawType,
+                                           GrPathRendererChain::StencilSupport* stencilSupport) {
+
     if (NULL == fPathRendererChain) {
-        fPathRendererChain = 
-            new GrPathRendererChain(this, GrPathRendererChain::kNone_UsageFlag);
+        fPathRendererChain = SkNEW_ARGS(GrPathRendererChain, (this));
     }
-    return fPathRendererChain->getPathRenderer(path, fill, target, antiAlias);
+
+    GrPathRenderer* pr = fPathRendererChain->getPathRenderer(path,
+                                                             stroke,
+                                                             target,
+                                                             drawType,
+                                                             stencilSupport);
+
+    if (NULL == pr && allowSW) {
+        if (NULL == fSoftwarePathRenderer) {
+            fSoftwarePathRenderer = SkNEW_ARGS(GrSoftwarePathRenderer, (this));
+        }
+        pr = fSoftwarePathRenderer;
+    }
+
+    return pr;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-
-void GrContext::setRenderTarget(GrRenderTarget* target) {
-    ASSERT_OWNED_RESOURCE(target);
-    this->flush(false);
-    fGpu->drawState()->setRenderTarget(target);
-}
-
-GrRenderTarget* GrContext::getRenderTarget() {
-    return fGpu->drawState()->getRenderTarget();
-}
-
-const GrRenderTarget* GrContext::getRenderTarget() const {
-    return fGpu->getDrawState().getRenderTarget();
-}
-
-const GrMatrix& GrContext::getMatrix() const {
-    return fGpu->getDrawState().getViewMatrix();
-}
-
-void GrContext::setMatrix(const GrMatrix& m) {
-    fGpu->drawState()->setViewMatrix(m);
-}
-
-void GrContext::concatMatrix(const GrMatrix& m) const {
-    fGpu->drawState()->preConcatViewMatrix(m);
-}
-
-static inline intptr_t setOrClear(intptr_t bits, int shift, intptr_t pred) {
-    intptr_t mask = 1 << shift;
-    if (pred) {
-        bits |= mask;
-    } else {
-        bits &= ~mask;
-    }
-    return bits;
-}
-
-void GrContext::resetStats() {
-    fGpu->resetStats();
-}
-
-const GrGpuStats& GrContext::getStats() const {
-    return fGpu->getStats();
-}
-
-void GrContext::printStats() const {
-    fGpu->printStats();
-}
-
-GrContext::GrContext(GrGpu* gpu) {
-    fGpu = gpu;
-    fGpu->ref();
-    fGpu->setContext(this);
-
-    fPathRendererChain = NULL;
-
-    fTextureCache = new GrResourceCache(MAX_TEXTURE_CACHE_COUNT,
-                                        MAX_TEXTURE_CACHE_BYTES);
-    fFontCache = new GrFontCache(fGpu);
-
-    fLastDrawCategory = kUnbuffered_DrawCategory;
-
-    fDrawBuffer = NULL;
-    fDrawBufferVBAllocPool = NULL;
-    fDrawBufferIBAllocPool = NULL;
-
-    fAAFillRectIndexBuffer = NULL;
-    fAAStrokeRectIndexBuffer = NULL;
-    
-    this->setupDrawBuffer();
+bool GrContext::isConfigRenderable(GrPixelConfig config, bool withMSAA) const {
+    return fGpu->caps()->isConfigRenderable(config, withMSAA);
 }
 
 void GrContext::setupDrawBuffer() {
+    SkASSERT(NULL == fDrawBuffer);
+    SkASSERT(NULL == fDrawBufferVBAllocPool);
+    SkASSERT(NULL == fDrawBufferIBAllocPool);
 
-    GrAssert(NULL == fDrawBuffer);
-    GrAssert(NULL == fDrawBufferVBAllocPool);
-    GrAssert(NULL == fDrawBufferIBAllocPool);
-
-#if DEFER_TEXT_RENDERING || BATCH_RECT_TO_RECT
     fDrawBufferVBAllocPool =
-        new GrVertexBufferAllocPool(fGpu, false,
+        SkNEW_ARGS(GrVertexBufferAllocPool, (fGpu, false,
                                     DRAW_BUFFER_VBPOOL_BUFFER_SIZE,
-                                    DRAW_BUFFER_VBPOOL_PREALLOC_BUFFERS);
+                                    DRAW_BUFFER_VBPOOL_PREALLOC_BUFFERS));
     fDrawBufferIBAllocPool =
-        new GrIndexBufferAllocPool(fGpu, false,
+        SkNEW_ARGS(GrIndexBufferAllocPool, (fGpu, false,
                                    DRAW_BUFFER_IBPOOL_BUFFER_SIZE,
-                                   DRAW_BUFFER_IBPOOL_PREALLOC_BUFFERS);
+                                   DRAW_BUFFER_IBPOOL_PREALLOC_BUFFERS));
 
-    fDrawBuffer = new GrInOrderDrawBuffer(fGpu,
-                                          fDrawBufferVBAllocPool,
-                                          fDrawBufferIBAllocPool);
-#endif
+    fDrawBuffer = SkNEW_ARGS(GrInOrderDrawBuffer, (fGpu,
+                                                   fDrawBufferVBAllocPool,
+                                                   fDrawBufferIBAllocPool));
 
-#if BATCH_RECT_TO_RECT
-    fDrawBuffer->setQuadIndexBuffer(this->getQuadIndexBuffer());
-#endif
+    fDrawBuffer->setDrawState(fDrawState);
 }
 
-GrDrawTarget* GrContext::getTextTarget(const GrPaint& paint) {
-    GrDrawTarget* target;
-#if DEFER_TEXT_RENDERING
-    target = prepareToDraw(paint, kText_DrawCategory);
-#else
-    target = prepareToDraw(paint, kUnbuffered_DrawCategory);
-#endif
-    this->setPaint(paint, target);
-    return target;
+GrDrawTarget* GrContext::getTextTarget() {
+    return this->prepareToDraw(NULL, BUFFERED_DRAW, NULL, NULL);
 }
 
 const GrIndexBuffer* GrContext::getQuadIndexBuffer() const {
     return fGpu->getQuadIndexBuffer();
 }
 
-void GrContext::convolve(GrTexture* texture,
-                         const SkRect& rect,
-                         const float* kernel,
-                         int kernelWidth,
-                         GrSamplerState::FilterDirection direction) {
-    ASSERT_OWNED_RESOURCE(texture);
-
-    GrDrawTarget::AutoStateRestore asr(fGpu);
-    GrDrawState* drawState = fGpu->drawState();
-    GrRenderTarget* target = drawState->getRenderTarget();
-    drawState->reset();
-    drawState->setRenderTarget(target);
-    GrMatrix sampleM;
-    sampleM.setIDiv(texture->width(), texture->height());
-    drawState->sampler(0)->reset(GrSamplerState::kClamp_WrapMode,
-                                 GrSamplerState::kConvolution_Filter,
-                                 sampleM);
-    drawState->sampler(0)->setConvolutionParams(kernelWidth, kernel);
-    drawState->sampler(0)->setFilterDirection(direction);
-    drawState->setTexture(0, texture);
-    fGpu->drawSimpleRect(rect, NULL, 1 << 0);
+namespace {
+void test_pm_conversions(GrContext* ctx, int* pmToUPMValue, int* upmToPMValue) {
+    GrConfigConversionEffect::PMConversion pmToUPM;
+    GrConfigConversionEffect::PMConversion upmToPM;
+    GrConfigConversionEffect::TestForPreservingPMConversions(ctx, &pmToUPM, &upmToPM);
+    *pmToUPMValue = pmToUPM;
+    *upmToPMValue = upmToPM;
+}
 }
 
-void GrContext::applyMorphology(GrTexture* texture,
-                                const SkRect& rect,
-                                int radius,
-                                GrSamplerState::Filter filter,
-                                GrSamplerState::FilterDirection direction) {
-    ASSERT_OWNED_RESOURCE(texture);
-    GrAssert(filter == GrSamplerState::kErode_Filter ||
-             filter == GrSamplerState::kDilate_Filter);
+const GrEffectRef* GrContext::createPMToUPMEffect(GrTexture* texture,
+                                                  bool swapRAndB,
+                                                  const SkMatrix& matrix) {
+    if (!fDidTestPMConversions) {
+        test_pm_conversions(this, &fPMToUPMConversion, &fUPMToPMConversion);
+        fDidTestPMConversions = true;
+    }
+    GrConfigConversionEffect::PMConversion pmToUPM =
+        static_cast<GrConfigConversionEffect::PMConversion>(fPMToUPMConversion);
+    if (GrConfigConversionEffect::kNone_PMConversion != pmToUPM) {
+        return GrConfigConversionEffect::Create(texture, swapRAndB, pmToUPM, matrix);
+    } else {
+        return NULL;
+    }
+}
 
-    GrDrawTarget::AutoStateRestore asr(fGpu);
-    GrDrawState* drawState = fGpu->drawState();
-    GrRenderTarget* target = drawState->getRenderTarget();
-    drawState->reset();
-    drawState->setRenderTarget(target);
-    GrMatrix sampleM;
-    sampleM.setIDiv(texture->width(), texture->height());
-    drawState->sampler(0)->reset(GrSamplerState::kClamp_WrapMode,
-                                 filter,
-                                 sampleM);
-    drawState->sampler(0)->setMorphologyRadius(radius);
-    drawState->sampler(0)->setFilterDirection(direction);
-    drawState->setTexture(0, texture);
-    fGpu->drawSimpleRect(rect, NULL, 1 << 0);
+const GrEffectRef* GrContext::createUPMToPMEffect(GrTexture* texture,
+                                                  bool swapRAndB,
+                                                  const SkMatrix& matrix) {
+    if (!fDidTestPMConversions) {
+        test_pm_conversions(this, &fPMToUPMConversion, &fUPMToPMConversion);
+        fDidTestPMConversions = true;
+    }
+    GrConfigConversionEffect::PMConversion upmToPM =
+        static_cast<GrConfigConversionEffect::PMConversion>(fUPMToPMConversion);
+    if (GrConfigConversionEffect::kNone_PMConversion != upmToPM) {
+        return GrConfigConversionEffect::Create(texture, swapRAndB, upmToPM, matrix);
+    } else {
+        return NULL;
+    }
+}
+
+GrPath* GrContext::createPath(const SkPath& inPath, const SkStrokeRec& stroke) {
+    SkASSERT(fGpu->caps()->pathRenderingSupport());
+
+    // TODO: now we add to fTextureCache. This should change to fResourceCache.
+    GrResourceKey resourceKey = GrPath::ComputeKey(inPath, stroke);
+    GrPath* path = static_cast<GrPath*>(fTextureCache->find(resourceKey));
+    if (NULL != path && path->isEqualTo(inPath, stroke)) {
+        path->ref();
+    } else {
+        path = fGpu->createPath(inPath, stroke);
+        fTextureCache->purgeAsNeeded(1, path->sizeInBytes());
+        fTextureCache->addResource(resourceKey, path);
+    }
+    return path;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+#if GR_CACHE_STATS
+void GrContext::printCacheStats() const {
+    fTextureCache->printStats();
+}
+#endif

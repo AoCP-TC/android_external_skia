@@ -1,16 +1,15 @@
 {
-  'includes': [
-    'common.gypi',
-  ],
   'targets': [
     {
       'target_name': 'xml',
+      'product_name': 'skia_xml',
       'type': 'static_library',
+      'standalone_static_library': 1,
+      'dependencies': [
+        'skia_lib.gyp:skia_lib',
+      ],
       'include_dirs': [
-        '../include/config',
-        '../include/core',
         '../include/xml',
-        '../include/utils',
       ],
       'sources': [
         '../include/xml/SkBML_WXMLParser.h',
@@ -33,7 +32,7 @@
           '../src/xml/SkXMLPullParser.cpp', #if 0 around class decl in header
       ],
       'conditions': [
-        [ 'skia_os in ["win", "mac", "linux", "freebsd", "openbsd", "solaris", "android"]', {
+        [ 'skia_os in ["win", "mac", "linux", "freebsd", "openbsd", "solaris", "android", "ios", "nacl", "chromeos"]', {
           'sources!': [
             # no jsapi.h by default on system
             '../include/xml/SkJS.h',
@@ -50,9 +49,3 @@
     },
   ],
 }
-
-# Local Variables:
-# tab-width:2
-# indent-tabs-mode:nil
-# End:
-# vim: set expandtab tabstop=2 shiftwidth=2:

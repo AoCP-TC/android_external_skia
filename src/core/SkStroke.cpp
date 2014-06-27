@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2008 The Android Open Source Project
  *
@@ -6,13 +5,12 @@
  * found in the LICENSE file.
  */
 
-
 #include "SkStrokerPriv.h"
 #include "SkGeometry.h"
 #include "SkPath.h"
 
 #define kMaxQuadSubdivide   5
-#define kMaxCubicSubdivide  4
+#define kMaxCubicSubdivide  7
 
 static inline bool degenerate_vector(const SkVector& v) {
     return !SkPoint::CanNormalize(v.fX, v.fY);
@@ -32,9 +30,18 @@ static inline bool normals_too_curvy(const SkVector& norm0, SkVector& norm1) {
 }
 
 static inline bool normals_too_pinchy(const SkVector& norm0, SkVector& norm1) {
-    static const SkScalar kTooPinchyNormalDotProd = -SK_Scalar1 * 999 / 1000;
+    // if the dot-product is -1, then we are definitely too pinchy. We tweak
+    // that by an epsilon to ensure we have significant bits in our test
+    static const int kMinSigBitsForDot = 8;
+    static const SkScalar kDotEpsilon = FLT_EPSILON * (1 << kMinSigBitsForDot);
+    static const SkScalar kTooPinchyNormalDotProd = kDotEpsilon - 1;
 
-    return SkPoint::DotProduct(norm0, norm1) <= kTooPinchyNormalDotProd;
+    // just some sanity asserts to help document the expected range
+    SkASSERT(kTooPinchyNormalDotProd >= -1);
+    SkASSERT(kTooPinchyNormalDotProd < SkDoubleToScalar(-0.999));
+
+    SkScalar dot = SkPoint::DotProduct(norm0, norm1);
+    return dot <= kTooPinchyNormalDotProd;
 }
 
 static bool set_normal_unitnormal(const SkPoint& before, const SkPoint& after,
@@ -63,7 +70,8 @@ static bool set_normal_unitnormal(const SkVector& vec,
 
 class SkPathStroker {
 public:
-    SkPathStroker(SkScalar radius, SkScalar miterLimit, SkPaint::Cap cap,
+    SkPathStroker(const SkPath& src,
+                  SkScalar radius, SkScalar miterLimit, SkPaint::Cap cap,
                   SkPaint::Join join);
 
     void moveTo(const SkPoint&);
@@ -171,13 +179,16 @@ void SkPathStroker::finishContour(bool close, bool currIsLine) {
             fOuter.close();
         }
     }
-    fInner.reset();
+    // since we may re-use fInner, we rewind instead of reset, to save on
+    // reallocating its internal storage.
+    fInner.rewind();
     fSegmentCount = -1;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-SkPathStroker::SkPathStroker(SkScalar radius, SkScalar miterLimit,
+SkPathStroker::SkPathStroker(const SkPath& src,
+                             SkScalar radius, SkScalar miterLimit,
                              SkPaint::Cap cap, SkPaint::Join join)
         : fRadius(radius) {
 
@@ -197,6 +208,15 @@ SkPathStroker::SkPathStroker(SkScalar radius, SkScalar miterLimit,
     fJoiner = SkStrokerPriv::JoinFactory(join);
     fSegmentCount = -1;
     fPrevIsLine = false;
+
+    // Need some estimate of how large our final result (fOuter)
+    // and our per-contour temp (fInner) will be, so we don't spend
+    // extra time repeatedly growing these arrays.
+    //
+    // 3x for result == inner + outer + join (swag)
+    // 1x for inner == 'wag' (worst contour length would be better guess)
+    fOuter.incReserve(src.countPoints() * 3);
+    fInner.incReserve(src.countPoints());
 }
 
 void SkPathStroker::moveTo(const SkPoint& pt) {
@@ -244,9 +264,13 @@ void SkPathStroker::quad_to(const SkPoint pts[3],
         this->quad_to(&tmp[0], normalAB, unitNormalAB, &norm, &unit, subDivide);
         this->quad_to(&tmp[2], norm, unit, normalBC, unitNormalBC, subDivide);
     } else {
-        SkVector    normalB, unitB;
-        SkAssertResult(set_normal_unitnormal(pts[0], pts[2], fRadius,
-                                             &normalB, &unitB));
+        SkVector    normalB;
+
+        normalB = pts[2] - pts[0];
+        normalB.rotateCCW();
+        SkScalar dot = SkPoint::DotProduct(unitNormalAB, *unitNormalBC);
+        SkAssertResult(normalB.setLength(SkScalarDiv(fRadius,
+                                     SkScalarSqrt((SK_Scalar1 + dot)/2))));
 
         fOuter.quadTo(  pts[1].fX + normalB.fX, pts[1].fY + normalB.fY,
                         pts[2].fX + normalBC->fX, pts[2].fY + normalBC->fY);
@@ -288,13 +312,19 @@ DRAW_LINE:
     SkAssertResult(set_normal_unitnormal(cd, fRadius, normalCD, unitNormalCD));
     bool degenerateBC = !set_normal_unitnormal(pts[1], pts[2], fRadius,
                                                &normalBC, &unitNormalBC);
-
+#ifndef SK_IGNORE_CUBIC_STROKE_FIX
+    if (--subDivide < 0) {
+        goto DRAW_LINE;
+    }
+#endif
     if (degenerateBC || normals_too_curvy(unitNormalAB, unitNormalBC) ||
              normals_too_curvy(unitNormalBC, *unitNormalCD)) {
+#ifdef SK_IGNORE_CUBIC_STROKE_FIX
         // subdivide if we can
         if (--subDivide < 0) {
             goto DRAW_LINE;
         }
+#endif
         SkPoint     tmp[7];
         SkVector    norm, unit, dummy, unitDummy;
 
@@ -306,32 +336,22 @@ DRAW_LINE:
         this->cubic_to(&tmp[3], norm, unit, &dummy, &unitDummy, subDivide);
     } else {
         SkVector    normalB, normalC;
-        
+
         // need normals to inset/outset the off-curve pts B and C
 
-        if (0) {    // this is normal to the line between our adjacent pts
-            normalB = pts[2] - pts[0];
-            normalB.rotateCCW();
-            SkAssertResult(normalB.setLength(fRadius));
+        SkVector    unitBC = pts[2] - pts[1];
+        unitBC.normalize();
+        unitBC.rotateCCW();
 
-            normalC = pts[3] - pts[1];
-            normalC.rotateCCW();
-            SkAssertResult(normalC.setLength(fRadius));
-        } else {    // miter-join
-            SkVector    unitBC = pts[2] - pts[1];
-            unitBC.normalize();
-            unitBC.rotateCCW();
+        normalB = unitNormalAB + unitBC;
+        normalC = *unitNormalCD + unitBC;
 
-            normalB = unitNormalAB + unitBC;
-            normalC = *unitNormalCD + unitBC;
-
-            SkScalar dot = SkPoint::DotProduct(unitNormalAB, unitBC);
-            SkAssertResult(normalB.setLength(SkScalarDiv(fRadius,
-                                        SkScalarSqrt((SK_Scalar1 + dot)/2))));
-            dot = SkPoint::DotProduct(*unitNormalCD, unitBC);
-            SkAssertResult(normalC.setLength(SkScalarDiv(fRadius,
-                                        SkScalarSqrt((SK_Scalar1 + dot)/2))));
-        }
+        SkScalar dot = SkPoint::DotProduct(unitNormalAB, unitBC);
+        SkAssertResult(normalB.setLength(SkScalarDiv(fRadius,
+                                    SkScalarSqrt((SK_Scalar1 + dot)/2))));
+        dot = SkPoint::DotProduct(*unitNormalCD, unitBC);
+        SkAssertResult(normalC.setLength(SkScalarDiv(fRadius,
+                                    SkScalarSqrt((SK_Scalar1 + dot)/2))));
 
         fOuter.cubicTo( pts[1].fX + normalB.fX, pts[1].fY + normalB.fY,
                         pts[2].fX + normalC.fX, pts[2].fY + normalC.fY,
@@ -430,12 +450,7 @@ void SkPathStroker::cubicTo(const SkPoint& pt1, const SkPoint& pt2,
         pts[2] = pt2;
         pts[3] = pt3;
 
-#if 1
         count = SkChopCubicAtMaxCurvature(pts, tmp, tValues);
-#else
-        count = 1;
-        memcpy(tmp, pts, 4 * sizeof(SkPoint));
-#endif
         n = normalAB;
         u = unitAB;
         for (i = 0; i < count; i++) {
@@ -448,22 +463,6 @@ void SkPathStroker::cubicTo(const SkPoint& pt1, const SkPoint& pt2,
             u = unitCD;
 
         }
-
-        // check for too pinchy
-        for (i = 1; i < count; i++) {
-            SkPoint p;
-            SkVector    v, c;
-
-            SkEvalCubicAt(pts, tValues[i - 1], &p, &v, &c);
-
-            SkScalar    dot = SkPoint::DotProduct(c, c);
-            v.scale(SkScalarInvert(dot));
-
-            if (SkScalarNearlyZero(v.fX) && SkScalarNearlyZero(v.fY)) {
-                fExtra.addCircle(p.fX, p.fY, fRadius, SkPath::kCW_Direction);
-            }
-        }
-
     }
 
     this->postJoinTo(pt3, normalCD, unitCD);
@@ -520,103 +519,104 @@ void SkStroke::setJoin(SkPaint::Join join) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#ifdef SK_SCALAR_IS_FIXED
-    /*  return non-zero if the path is too big, and should be shrunk to avoid
-        overflows during intermediate calculations. Note that we compute the
-        bounds for this. If we had a custom callback/walker for paths, we could
-        perhaps go faster by using that, and just perform the abs | in that
-        routine
-    */
-    static int needs_to_shrink(const SkPath& path) {
-        const SkRect& r = path.getBounds();
-        SkFixed mask = SkAbs32(r.fLeft);
-        mask |= SkAbs32(r.fTop);
-        mask |= SkAbs32(r.fRight);
-        mask |= SkAbs32(r.fBottom);
-        // we need the top 3 bits clear (after abs) to avoid overflow
-        return mask >> 29;
-    }
-
-    static void identity_proc(SkPoint pts[], int count) {}
-    static void shift_down_2_proc(SkPoint pts[], int count) {
-        for (int i = 0; i < count; i++) {
-            pts->fX >>= 2;
-            pts->fY >>= 2;
-            pts += 1;
+// If src==dst, then we use a tmp path to record the stroke, and then swap
+// its contents with src when we're done.
+class AutoTmpPath {
+public:
+    AutoTmpPath(const SkPath& src, SkPath** dst) : fSrc(src) {
+        if (&src == *dst) {
+            *dst = &fTmpDst;
+            fSwapWithSrc = true;
+        } else {
+            (*dst)->reset();
+            fSwapWithSrc = false;
         }
     }
-    #define APPLY_PROC(proc, pts, count)    proc(pts, count)
-#else   // float does need any of this
-    #define APPLY_PROC(proc, pts, count)
-#endif
+
+    ~AutoTmpPath() {
+        if (fSwapWithSrc) {
+            fTmpDst.swap(*const_cast<SkPath*>(&fSrc));
+        }
+    }
+
+private:
+    SkPath          fTmpDst;
+    const SkPath&   fSrc;
+    bool            fSwapWithSrc;
+};
 
 void SkStroke::strokePath(const SkPath& src, SkPath* dst) const {
     SkASSERT(&src != NULL && dst != NULL);
 
     SkScalar radius = SkScalarHalf(fWidth);
 
-    dst->reset();
+    AutoTmpPath tmp(src, &dst);
+
     if (radius <= 0) {
         return;
     }
-    
-#ifdef SK_SCALAR_IS_FIXED
-    void (*proc)(SkPoint pts[], int count) = identity_proc;
-    if (needs_to_shrink(src)) {
-        proc = shift_down_2_proc;
-        radius >>= 2;
-        if (radius == 0) {
+
+    // If src is really a rect, call our specialty strokeRect() method
+    {
+        bool isClosed;
+        SkPath::Direction dir;
+        if (src.isRect(&isClosed, &dir) && isClosed) {
+            this->strokeRect(src.getBounds(), dst, dir);
+            // our answer should preserve the inverseness of the src
+            if (src.isInverseFillType()) {
+                SkASSERT(!dst->isInverseFillType());
+                dst->toggleInverseFillType();
+            }
             return;
         }
     }
-#endif
 
-    SkPathStroker   stroker(radius, fMiterLimit, this->getCap(),
+    SkAutoConicToQuads converter;
+    const SkScalar conicTol = SK_Scalar1 / 4;
+
+    SkPathStroker   stroker(src, radius, fMiterLimit, this->getCap(),
                             this->getJoin());
-
     SkPath::Iter    iter(src, false);
-    SkPoint         pts[4];
-    SkPath::Verb    verb, lastSegment = SkPath::kMove_Verb;
+    SkPath::Verb    lastSegment = SkPath::kMove_Verb;
 
-    while ((verb = iter.next(pts)) != SkPath::kDone_Verb) {
-        switch (verb) {
+    for (;;) {
+        SkPoint  pts[4];
+        switch (iter.next(pts, false)) {
             case SkPath::kMove_Verb:
-                APPLY_PROC(proc, &pts[0], 1);
                 stroker.moveTo(pts[0]);
                 break;
             case SkPath::kLine_Verb:
-                APPLY_PROC(proc, &pts[1], 1);
                 stroker.lineTo(pts[1]);
-                lastSegment = verb;
+                lastSegment = SkPath::kLine_Verb;
                 break;
             case SkPath::kQuad_Verb:
-                APPLY_PROC(proc, &pts[1], 2);
                 stroker.quadTo(pts[1], pts[2]);
-                lastSegment = verb;
+                lastSegment = SkPath::kQuad_Verb;
                 break;
+            case SkPath::kConic_Verb: {
+                // todo: if we had maxcurvature for conics, perhaps we should
+                // natively extrude the conic instead of converting to quads.
+                const SkPoint* quadPts =
+                    converter.computeQuads(pts, iter.conicWeight(), conicTol);
+                for (int i = 0; i < converter.countQuads(); ++i) {
+                    stroker.quadTo(quadPts[1], quadPts[2]);
+                    quadPts += 2;
+                }
+                lastSegment = SkPath::kQuad_Verb;
+            } break;
             case SkPath::kCubic_Verb:
-                APPLY_PROC(proc, &pts[1], 3);
                 stroker.cubicTo(pts[1], pts[2], pts[3]);
-                lastSegment = verb;
+                lastSegment = SkPath::kCubic_Verb;
                 break;
             case SkPath::kClose_Verb:
                 stroker.close(lastSegment == SkPath::kLine_Verb);
                 break;
-            default:
-                break;
+            case SkPath::kDone_Verb:
+                goto DONE;
         }
     }
+DONE:
     stroker.done(dst, lastSegment == SkPath::kLine_Verb);
-
-#ifdef SK_SCALAR_IS_FIXED
-    // undo our previous down_shift
-    if (shift_down_2_proc == proc) {
-        // need a real shift methid on path. antialias paths could use this too
-        SkMatrix matrix;
-        matrix.setScale(SkIntToScalar(4), SkIntToScalar(4));
-        dst->transform(matrix);
-    }
-#endif
 
     if (fDoFill) {
         if (src.cheapIsDirection(SkPath::kCCW_Direction)) {
@@ -637,7 +637,7 @@ void SkStroke::strokePath(const SkPath& src, SkPath* dst) const {
             paint.setStrokeWidth(7);
             paint.setStrokeCap(SkPaint::kRound_Cap);
             canvas->drawLine(pts[0].fX, pts[0].fY, pts[1].fX, pts[1].fY, paint);
-        }        
+        }
 #endif
 #if 0
         if (2 == src.countPoints()) {
@@ -653,12 +653,82 @@ void SkStroke::strokePath(const SkPath& src, SkPath* dst) const {
     }
 }
 
-void SkStroke::strokeLine(const SkPoint& p0, const SkPoint& p1,
-                          SkPath* dst) const {
-    SkPath  tmp;
-
-    tmp.moveTo(p0);
-    tmp.lineTo(p1);
-    this->strokePath(tmp, dst);
+static SkPath::Direction reverse_direction(SkPath::Direction dir) {
+    SkASSERT(SkPath::kUnknown_Direction != dir);
+    return SkPath::kCW_Direction == dir ? SkPath::kCCW_Direction : SkPath::kCW_Direction;
 }
 
+static void addBevel(SkPath* path, const SkRect& r, const SkRect& outer, SkPath::Direction dir) {
+    SkPoint pts[8];
+
+    if (SkPath::kCW_Direction == dir) {
+        pts[0].set(r.fLeft, outer.fTop);
+        pts[1].set(r.fRight, outer.fTop);
+        pts[2].set(outer.fRight, r.fTop);
+        pts[3].set(outer.fRight, r.fBottom);
+        pts[4].set(r.fRight, outer.fBottom);
+        pts[5].set(r.fLeft, outer.fBottom);
+        pts[6].set(outer.fLeft, r.fBottom);
+        pts[7].set(outer.fLeft, r.fTop);
+    } else {
+        pts[7].set(r.fLeft, outer.fTop);
+        pts[6].set(r.fRight, outer.fTop);
+        pts[5].set(outer.fRight, r.fTop);
+        pts[4].set(outer.fRight, r.fBottom);
+        pts[3].set(r.fRight, outer.fBottom);
+        pts[2].set(r.fLeft, outer.fBottom);
+        pts[1].set(outer.fLeft, r.fBottom);
+        pts[0].set(outer.fLeft, r.fTop);
+    }
+    path->addPoly(pts, 8, true);
+}
+
+void SkStroke::strokeRect(const SkRect& origRect, SkPath* dst,
+                          SkPath::Direction dir) const {
+    SkASSERT(dst != NULL);
+    dst->reset();
+
+    SkScalar radius = SkScalarHalf(fWidth);
+    if (radius <= 0) {
+        return;
+    }
+
+    SkScalar rw = origRect.width();
+    SkScalar rh = origRect.height();
+    if ((rw < 0) ^ (rh < 0)) {
+        dir = reverse_direction(dir);
+    }
+    SkRect rect(origRect);
+    rect.sort();
+    // reassign these, now that we know they'll be >= 0
+    rw = rect.width();
+    rh = rect.height();
+
+    SkRect r(rect);
+    r.outset(radius, radius);
+
+    SkPaint::Join join = (SkPaint::Join)fJoin;
+    if (SkPaint::kMiter_Join == join && fMiterLimit < SK_ScalarSqrt2) {
+        join = SkPaint::kBevel_Join;
+    }
+
+    switch (join) {
+        case SkPaint::kMiter_Join:
+            dst->addRect(r, dir);
+            break;
+        case SkPaint::kBevel_Join:
+            addBevel(dst, rect, r, dir);
+            break;
+        case SkPaint::kRound_Join:
+            dst->addRoundRect(r, radius, radius, dir);
+            break;
+        default:
+            break;
+    }
+
+    if (fWidth < SkMinScalar(rw, rh) && !fDoFill) {
+        r = rect;
+        r.inset(radius, radius);
+        dst->addRect(r, reverse_direction(dir));
+    }
+}

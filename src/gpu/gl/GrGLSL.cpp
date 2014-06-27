@@ -7,23 +7,25 @@
 
 #include "GrGLSL.h"
 #include "GrGLShaderVar.h"
+#include "SkString.h"
 
-GrGLSLGeneration GrGetGLSLGeneration(GrGLBinding binding,
-                                   const GrGLInterface* gl) {
+GrGLSLGeneration GrGetGLSLGeneration(GrGLBinding binding, const GrGLInterface* gl) {
     GrGLSLVersion ver = GrGLGetGLSLVersion(gl);
     switch (binding) {
         case kDesktop_GrGLBinding:
-            GrAssert(ver >= GR_GLSL_VER(1,10));
+            SkASSERT(ver >= GR_GLSL_VER(1,10));
             if (ver >= GR_GLSL_VER(1,50)) {
                 return k150_GrGLSLGeneration;
+            } else if (ver >= GR_GLSL_VER(1,40)) {
+                return k140_GrGLSLGeneration;
             } else if (ver >= GR_GLSL_VER(1,30)) {
                 return k130_GrGLSLGeneration;
             } else {
                 return k110_GrGLSLGeneration;
             }
-        case kES2_GrGLBinding:
+        case kES_GrGLBinding:
             // version 1.00 of ES GLSL based on ver 1.20 of desktop GLSL
-            GrAssert(ver >= GR_GL_VER(1,00));
+            SkASSERT(ver >= GR_GL_VER(1,00));
             return k110_GrGLSLGeneration;
         default:
             GrCrash("Unknown GL Binding");
@@ -31,52 +33,60 @@ GrGLSLGeneration GrGetGLSLGeneration(GrGLBinding binding,
     }
 }
 
-const char* GrGetGLSLVersionDecl(GrGLBinding binding,
-                                   GrGLSLGeneration gen) {
-    switch (gen) {
+const char* GrGetGLSLVersionDecl(const GrGLContextInfo& info) {
+    switch (info.glslGeneration()) {
         case k110_GrGLSLGeneration:
-            if (kES2_GrGLBinding == binding) {
+            if (kES_GrGLBinding == info.binding()) {
                 // ES2s shader language is based on version 1.20 but is version
                 // 1.00 of the ES language.
                 return "#version 100\n";
             } else {
-                GrAssert(kDesktop_GrGLBinding == binding);
+                SkASSERT(kDesktop_GrGLBinding == info.binding());
                 return "#version 110\n";
             }
         case k130_GrGLSLGeneration:
-            GrAssert(kDesktop_GrGLBinding == binding);
+            SkASSERT(kDesktop_GrGLBinding == info.binding());
             return "#version 130\n";
+        case k140_GrGLSLGeneration:
+            SkASSERT(kDesktop_GrGLBinding == info.binding());
+            return "#version 140\n";
         case k150_GrGLSLGeneration:
-            GrAssert(kDesktop_GrGLBinding == binding);
-            return "#version 150\n";
+            SkASSERT(kDesktop_GrGLBinding == info.binding());
+            if (info.caps()->isCoreProfile()) {
+                return "#version 150\n";
+            } else {
+                return "#version 150 compatibility\n";
+            }
         default:
             GrCrash("Unknown GL version.");
             return ""; // suppress warning
     }
 }
 
-const char* GrGetGLSLVarPrecisionDeclType(GrGLBinding binding) {
-    if (kES2_GrGLBinding == binding) {
-        return "mediump";
-    } else {
-        return " ";
+namespace {
+    void append_tabs(SkString* outAppend, int tabCnt) {
+        static const char kTabs[] = "\t\t\t\t\t\t\t\t";
+        while (tabCnt) {
+            int cnt = GrMin((int)GR_ARRAY_COUNT(kTabs), tabCnt);
+            outAppend->append(kTabs, cnt);
+            tabCnt -= cnt;
+        }
     }
 }
 
-const char* GrGetGLSLShaderPrecisionDecl(GrGLBinding binding) {
-    if (kES2_GrGLBinding == binding) {
-        return "precision mediump float;\n";
-    } else {
-        return "";
+void GrGLSLMulVarBy4f(SkString* outAppend,
+                      unsigned tabCnt,
+                      const char* vec4VarName,
+                      const GrGLSLExpr4& mulFactor) {
+    if (mulFactor.isOnes()) {
+        *outAppend = SkString();
     }
-}
 
-bool GrGLSLSetupFSColorOuput(GrGLSLGeneration gen,
-                             const char* nameIfDeclared,
-                             GrGLShaderVar* var) {
-    bool declaredOutput = k110_GrGLSLGeneration != gen;
-    var->set(GrGLShaderVar::kVec4f_Type,
-             GrGLShaderVar::kOut_TypeModifier,
-             declaredOutput ? nameIfDeclared : "gl_FragColor");
-    return declaredOutput;
+    append_tabs(outAppend, tabCnt);
+
+    if (mulFactor.isZeros()) {
+        outAppend->appendf("%s = vec4(0);\n", vec4VarName);
+    } else {
+        outAppend->appendf("%s *= %s;\n", vec4VarName, mulFactor.c_str());
+    }
 }

@@ -14,9 +14,9 @@
 
 #define DISCRETIZE_TRANSLATE_TO_AVOID_FLICKER   true
 
-static const float MAX_FLING_SPEED = 1500;
+static const SkScalar MAX_FLING_SPEED = SkIntToScalar(1500);
 
-static float pin_max_fling(float speed) {
+static SkScalar pin_max_fling(SkScalar speed) {
     if (speed > MAX_FLING_SPEED) {
         speed = MAX_FLING_SPEED;
     }
@@ -181,7 +181,7 @@ int SkTouchGesture::findRec(void* owner) const {
     return -1;
 }
 
-static float center(float pos0, float pos1) {
+static SkScalar center(float pos0, float pos1) {
     return (pos0 + pos1) * 0.5f;
 }
 
@@ -190,8 +190,8 @@ static const float MIN_ZOOM_SCALE = 0.25f;
 
 float SkTouchGesture::limitTotalZoom(float scale) const {
     // this query works 'cause we know that we're square-scale w/ no skew/rotation
-    const float curr = fGlobalM[0];
-    
+    const float curr = SkScalarToFloat(fGlobalM[0]);
+
     if (scale > 1 && curr * scale > MAX_ZOOM_SCALE) {
         scale = MAX_ZOOM_SCALE / curr;
     } else if (scale < 1 && curr * scale < MIN_ZOOM_SCALE) {
@@ -239,7 +239,7 @@ void SkTouchGesture::touchMoved(void* owner, float x, float y) {
             SkASSERT(kZoom_State == fState);
             const Rec& rec0 = fTouches[0];
             const Rec& rec1 = fTouches[1];
-            
+
             float scale = this->computePinch(rec0, rec1);
             scale = this->limitTotalZoom(scale);
 
@@ -325,5 +325,3 @@ bool SkTouchGesture::handleDblTap(float x, float y) {
     fLastUpP.set(x, y);
     return found;
 }
-
-

@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
@@ -6,9 +5,10 @@
  * found in the LICENSE file.
  */
 
-
-
 #include "SkData.h"
+#include "SkFlattenableBuffers.h"
+#include "SkOSFile.h"
+#include "SkOnce.h"
 
 SkData::SkData(const void* ptr, size_t size, ReleaseProc proc, void* context) {
     fPtr = ptr;
@@ -21,6 +21,14 @@ SkData::~SkData() {
     if (fReleaseProc) {
         fReleaseProc(fPtr, fSize, fReleaseProcContext);
     }
+}
+
+bool SkData::equals(const SkData* other) const {
+    if (NULL == other) {
+        return false;
+    }
+
+    return fSize == other->fSize && !memcmp(fPtr, other->fPtr, fSize);
 }
 
 size_t SkData::copyRange(size_t offset, size_t length, void* buffer) const {
@@ -40,11 +48,14 @@ size_t SkData::copyRange(size_t offset, size_t length, void* buffer) const {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+void SkData::NewEmptyImpl(SkData** empty) {
+    *empty = new SkData(NULL, 0, NULL, NULL);
+}
+
 SkData* SkData::NewEmpty() {
     static SkData* gEmptyRef;
-    if (NULL == gEmptyRef) {
-        gEmptyRef = new SkData(NULL, 0, NULL, NULL);
-    }
+    SK_DECLARE_STATIC_ONCE(once);
+    SkOnce(&once, SkData::NewEmptyImpl, &gEmptyRef);
     gEmptyRef->ref();
     return gEmptyRef;
 }
@@ -71,6 +82,41 @@ SkData* SkData::NewWithCopy(const void* data, size_t length) {
 SkData* SkData::NewWithProc(const void* data, size_t length,
                             ReleaseProc proc, void* context) {
     return new SkData(data, length, proc, context);
+}
+
+// assumes fPtr was allocated with sk_fmmap
+static void sk_mmap_releaseproc(const void* addr, size_t length, void*) {
+    sk_fmunmap(addr, length);
+}
+
+SkData* SkData::NewFromFILE(SkFILE* f) {
+    size_t size;
+    void* addr = sk_fmmap(f, &size);
+    if (NULL == addr) {
+        return NULL;
+    }
+
+    return SkData::NewWithProc(addr, size, sk_mmap_releaseproc, NULL);
+}
+
+SkData* SkData::NewFromFileName(const char path[]) {
+    SkFILE* f = path ? sk_fopen(path, kRead_SkFILE_Flag) : NULL;
+    if (NULL == f) {
+        return NULL;
+    }
+    SkData* data = NewFromFILE(f);
+    sk_fclose(f);
+    return data;
+}
+
+SkData* SkData::NewFromFD(int fd) {
+    size_t size;
+    void* addr = sk_fdmmap(fd, &size);
+    if (NULL == addr) {
+        return NULL;
+    }
+
+    return SkData::NewWithProc(addr, size, sk_mmap_releaseproc, NULL);
 }
 
 // assumes context is a SkData
@@ -101,3 +147,13 @@ SkData* SkData::NewSubset(const SkData* src, size_t offset, size_t length) {
                          const_cast<SkData*>(src));
 }
 
+SkData* SkData::NewWithCString(const char cstr[]) {
+    size_t size;
+    if (NULL == cstr) {
+        cstr = "";
+        size = 1;
+    } else {
+        size = strlen(cstr) + 1;
+    }
+    return NewWithCopy(cstr, size);
+}

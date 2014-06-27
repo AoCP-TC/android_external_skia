@@ -12,16 +12,15 @@
 
 #include "SkTypes.h"
 
-#ifdef SK_CAN_USE_FLOAT
-
 #include <math.h>
 #include <float.h>
 #include "SkFloatBits.h"
 
-// If math.h had powf(float, float), I could remove this wrapper
+// C++98 cmath std::pow seems to be the earliest portable way to get float pow.
+// However, on Linux including cmath undefines isfinite.
+// http://gcc.gnu.org/bugzilla/show_bug.cgi?id=14608
 static inline float sk_float_pow(float base, float exp) {
-    return static_cast<float>(pow(static_cast<double>(base),
-                                  static_cast<double>(exp)));
+    return powf(base, exp);
 }
 
 static inline float sk_float_copysign(float x, float y) {
@@ -78,6 +77,8 @@ static inline float sk_float_copysign(float x, float y) {
     #define sk_float_isinf(x)       isinf(x)
 #endif
 
+#define sk_double_isnan(a)          sk_float_isnan(a)
+
 #ifdef SK_USE_FLOATBITS
     #define sk_float_floor2int(x)   SkFloatToIntFloor(x)
     #define sk_float_round2int(x)   SkFloatToIntRound(x)
@@ -88,5 +89,52 @@ static inline float sk_float_copysign(float x, float y) {
     #define sk_float_ceil2int(x)    (int)sk_float_ceil(x)
 #endif
 
+extern const uint32_t gIEEENotANumber;
+extern const uint32_t gIEEEInfinity;
+extern const uint32_t gIEEENegativeInfinity;
+
+#define SK_FloatNaN                 (*SkTCast<const float*>(&gIEEENotANumber))
+#define SK_FloatInfinity            (*SkTCast<const float*>(&gIEEEInfinity))
+#define SK_FloatNegativeInfinity    (*SkTCast<const float*>(&gIEEENegativeInfinity))
+
+#if defined(__SSE__)
+#include <xmmintrin.h>
+#elif defined(__ARM_NEON__)
+#include <arm_neon.h>
 #endif
+
+// Fast, approximate inverse square root.
+// Compare to name-brand "1.0f / sk_float_sqrt(x)".  Should be around 10x faster on SSE, 2x on NEON.
+static inline float sk_float_rsqrt(const float x) {
+// We want all this inlined, so we'll inline SIMD and just take the hit when we don't know we've got
+// it at compile time.  This is going to be too fast to productively hide behind a function pointer.
+//
+// We do one step of Newton's method to refine the estimates in the NEON and null paths.  No
+// refinement is faster, but very innacurate.  Two steps is more accurate, but slower than 1/sqrt.
+#if defined(__SSE__)
+    float result;
+    _mm_store_ss(&result, _mm_rsqrt_ss(_mm_set_ss(x)));
+    return result;
+#elif defined(__ARM_NEON__)
+    // Get initial estimate.
+    const float32x2_t xx = vdup_n_f32(x);  // Clever readers will note we're doing everything 2x.
+    float32x2_t estimate = vrsqrte_f32(xx);
+
+    // One step of Newton's method to refine.
+    const float32x2_t estimate_sq = vmul_f32(estimate, estimate);
+    estimate = vmul_f32(estimate, vrsqrts_f32(xx, estimate_sq));
+    return vget_lane_f32(estimate, 0);  // 1 will work fine too; the answer's in both places.
+#else
+    // Get initial estimate.
+    int i = *SkTCast<int*>(&x);
+    i = 0x5f3759df - (i>>1);
+    float estimate = *SkTCast<float*>(&i);
+
+    // One step of Newton's method to refine.
+    const float estimate_sq = estimate*estimate;
+    estimate *= (1.5f-0.5f*x*estimate_sq);
+    return estimate;
+#endif
+}
+
 #endif

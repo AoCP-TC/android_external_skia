@@ -1,24 +1,21 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
+
 #include "Test.h"
+#include "TestClassDef.h"
 #include "SkBitmap.h"
 #include "SkCanvas.h"
 #include "SkColorPriv.h"
 #include "SkGradientShader.h"
 #include "SkRect.h"
 
-static inline const char* boolStr(bool value) {
-    return value ? "true" : "false";
-}
-
 // these are in the same order as the SkBitmap::Config enum
 static const char* gConfigName[] = {
-    "None", "A1", "A8", "Index8", "565", "4444", "8888", "RLE_Index8"
+    "None", "A8", "Index8", "565", "4444", "8888"
 };
 
 /** Returns -1 on success, else the x coord of the first bad pixel, return its
@@ -59,7 +56,7 @@ static int proc_8(const void* ptr, int w, uint32_t expected, uint32_t* bad) {
     return -1;
 }
 
-static int proc_bad(const void* ptr, int, uint32_t, uint32_t* bad) {
+static int proc_bad(const void*, int, uint32_t, uint32_t* bad) {
     *bad = 0;
     return 0;
 }
@@ -136,7 +133,7 @@ static void test_00_FF(skiatest::Reporter* reporter) {
         SkBitmap dstBM;
         dstBM.setConfig(gDstConfig[i], W, 1);
         dstBM.allocPixels();
-        
+
         SkCanvas canvas(dstBM);
         for (size_t j = 0; j < SK_ARRAY_COUNT(gSrcRec); j++) {
             srcBM.eraseColor(gSrcRec[j].fSrc);
@@ -166,7 +163,6 @@ static void test_00_FF(skiatest::Reporter* reporter) {
 
 struct Mesh {
     SkPoint     fPts[4];
-    uint16_t    fIndices[6];
 
     Mesh(const SkBitmap& bm, SkPaint* paint) {
         const SkScalar w = SkIntToScalar(bm.width());
@@ -178,7 +174,7 @@ struct Mesh {
         SkShader* s = SkShader::CreateBitmapShader(bm, SkShader::kClamp_TileMode,
                                                    SkShader::kClamp_TileMode);
         paint->setShader(s)->unref();
-        
+
     }
 
     void draw(SkCanvas* canvas, SkPaint* paint) {
@@ -199,7 +195,7 @@ static bool gOnce;
 static void test_diagonal(skiatest::Reporter* reporter) {
     static const int W = 64;
     static const int H = W;
-    
+
     static const SkBitmap::Config gDstConfig[] = {
         SkBitmap::kARGB_8888_Config,
         SkBitmap::kRGB_565_Config,
@@ -210,7 +206,7 @@ static void test_diagonal(skiatest::Reporter* reporter) {
     static const SkColor gDstBG[] = { 0, 0xFFFFFFFF };
 
     SkPaint paint;
-    
+
     SkBitmap srcBM;
     srcBM.setConfig(SkBitmap::kARGB_8888_Config, W, H);
     srcBM.allocPixels();
@@ -226,7 +222,7 @@ static void test_diagonal(skiatest::Reporter* reporter) {
         dstBM1.setConfig(gDstConfig[i], W, H);
         dstBM0.allocPixels();
         dstBM1.allocPixels();
-        
+
         SkCanvas canvas0(dstBM0);
         SkCanvas canvas1(dstBM1);
         SkColor bgColor;
@@ -236,7 +232,7 @@ static void test_diagonal(skiatest::Reporter* reporter) {
 
             for (int c = 0; c <= 0xFF; c++) {
                 srcBM.eraseARGB(0xFF, c, c, c);
-                
+
                 for (int k = 0; k < 4; k++) {
                     bool dither = (k & 1) != 0;
                     uint8_t alpha = (k & 2) ? 0x80 : 0xFF;
@@ -267,10 +263,7 @@ static void test_diagonal(skiatest::Reporter* reporter) {
     }
 }
 
-static void TestBlitRow(skiatest::Reporter* reporter) {
+DEF_TEST(BlitRow, reporter) {
     test_00_FF(reporter);
     test_diagonal(reporter);
 }
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("BlitRow", TestBlitRowClass, TestBlitRow)

@@ -13,26 +13,33 @@
 #include "SkFlattenable.h"
 #include "SkColor.h"
 
-/** \class SkXfermode
+class GrEffectRef;
+class GrTexture;
+class SkString;
 
-    SkXfermode is the base class for objects that are called to implement custom
-    "transfer-modes" in the drawing pipeline. The static function Create(Modes)
-    can be called to return an instance of any of the predefined subclasses as
-    specified in the Modes enum. When an SkXfermode is assigned to an SkPaint,
-    then objects drawn with that paint have the xfermode applied.
-*/
+/** \class SkXfermode
+ *
+ *  SkXfermode is the base class for objects that are called to implement custom
+ *  "transfer-modes" in the drawing pipeline. The static function Create(Modes)
+ *  can be called to return an instance of any of the predefined subclasses as
+ *  specified in the Modes enum. When an SkXfermode is assigned to an SkPaint,
+ *  then objects drawn with that paint have the xfermode applied.
+ *
+ *  All subclasses are required to be reentrant-safe : it must be legal to share
+ *  the same instance between several threads.
+ */
 class SK_API SkXfermode : public SkFlattenable {
 public:
+    SK_DECLARE_INST_COUNT(SkXfermode)
+
     SkXfermode() {}
 
     virtual void xfer32(SkPMColor dst[], const SkPMColor src[], int count,
-                        const SkAlpha aa[]);
+                        const SkAlpha aa[]) const;
     virtual void xfer16(uint16_t dst[], const SkPMColor src[], int count,
-                        const SkAlpha aa[]);
-    virtual void xfer4444(uint16_t dst[], const SkPMColor src[], int count,
-                          const SkAlpha aa[]);
+                        const SkAlpha aa[]) const;
     virtual void xferA8(SkAlpha dst[], const SkPMColor src[], int count,
-                        const SkAlpha aa[]);
+                        const SkAlpha aa[]) const;
 
     /** Enum of possible coefficients to describe some xfermodes
      */
@@ -66,13 +73,13 @@ public:
         srcover     one             isa
         dstover     ida             one
      */
-    virtual bool asCoeff(Coeff* src, Coeff* dst);
+    virtual bool asCoeff(Coeff* src, Coeff* dst) const;
 
     /**
      *  The same as calling xfermode->asCoeff(..), except that this also checks
-     *  if the xfermode is NULL, and if so, treats its as kSrcOver_Mode.
+     *  if the xfermode is NULL, and if so, treats it as kSrcOver_Mode.
      */
-    static bool AsCoeff(SkXfermode*, Coeff* src, Coeff* dst);
+    static bool AsCoeff(const SkXfermode*, Coeff* src, Coeff* dst);
 
     /** List of predefined xfermodes.
         The algebra for the modes uses the following symbols:
@@ -81,6 +88,9 @@ public:
         [a, c] - Resulting (alpha, color) values
         For these equations, the colors are in premultiplied state.
         If no xfermode is specified, kSrcOver is assumed.
+        The modes are ordered by those that can be expressed as a pair of Coeffs, followed by those
+        that aren't Coeffs but have separable r,g,b computations, and finally
+        those that are not separable.
      */
     enum Mode {
         kClear_Mode,    //!< [0, 0]
@@ -95,16 +105,14 @@ public:
         kSrcATop_Mode,  //!< [Da, Sc * Da + (1 - Sa) * Dc]
         kDstATop_Mode,  //!< [Sa, Sa * Dc + Sc * (1 - Da)]
         kXor_Mode,      //!< [Sa + Da - 2 * Sa * Da, Sc * (1 - Da) + (1 - Sa) * Dc]
+        kPlus_Mode,     //!< [Sa + Da, Sc + Dc]
+        kModulate_Mode, // multiplies all components (= alpha and color)
 
-        // all remaining modes are defined in the SVG Compositing standard
-        // http://www.w3.org/TR/2009/WD-SVGCompositing-20090430/
-        kPlus_Mode,
-        kMultiply_Mode, 
-        
-        // all above modes can be expressed as pair of src/dst Coeffs
-        kCoeffModesCnt, 
-        
-        kScreen_Mode = kCoeffModesCnt,
+        // Following blend modes are defined in the CSS Compositing standard:
+        // https://dvcs.w3.org/hg/FXTF/rawfile/tip/compositing/index.html#blending
+        kScreen_Mode,
+        kLastCoeffMode = kScreen_Mode,
+
         kOverlay_Mode,
         kDarken_Mode,
         kLighten_Mode,
@@ -114,22 +122,33 @@ public:
         kSoftLight_Mode,
         kDifference_Mode,
         kExclusion_Mode,
+        kMultiply_Mode,
+        kLastSeparableMode = kMultiply_Mode,
 
-        kLastMode = kExclusion_Mode
+        kHue_Mode,
+        kSaturation_Mode,
+        kColor_Mode,
+        kLuminosity_Mode,
+        kLastMode = kLuminosity_Mode
     };
+
+    /**
+     * Gets the name of the Mode as a string.
+     */
+    static const char* ModeName(Mode);
 
     /**
      *  If the xfermode is one of the modes in the Mode enum, then asMode()
      *  returns true and sets (if not null) mode accordingly. Otherwise it
      *  returns false and ignores the mode parameter.
      */
-    virtual bool asMode(Mode* mode);
+    virtual bool asMode(Mode* mode) const;
 
     /**
      *  The same as calling xfermode->asMode(mode), except that this also checks
-     *  if the xfermode is NULL, and if so, treats its as kSrcOver_Mode.
+     *  if the xfermode is NULL, and if so, treats it as kSrcOver_Mode.
      */
-    static bool AsMode(SkXfermode*, Mode* mode);
+    static bool AsMode(const SkXfermode*, Mode* mode);
 
     /**
      *  Returns true if the xfermode claims to be the specified Mode. This works
@@ -141,7 +160,7 @@ public:
      *      ...
      *  }
      */
-    static bool IsMode(SkXfermode* xfer, Mode mode);
+    static bool IsMode(const SkXfermode* xfer, Mode mode);
 
     /** Return an SkXfermode object for the specified mode.
      */
@@ -167,12 +186,37 @@ public:
      */
     static bool ModeAsCoeff(Mode mode, Coeff* src, Coeff* dst);
 
-    // DEPRECATED: call AsMode(...)
-    static bool IsMode(SkXfermode* xfer, Mode* mode) {
+    SK_ATTR_DEPRECATED("use AsMode(...)")
+    static bool IsMode(const SkXfermode* xfer, Mode* mode) {
         return AsMode(xfer, mode);
     }
 
-    SK_DECLARE_FLATTENABLE_REGISTRAR()
+    /** A subclass may implement this factory function to work with the GPU backend. It is legal
+        to call this with all params NULL to simply test the return value. If effect is non-NULL
+        then the xfermode may optionally allocate an effect to return and the caller as *effect.
+        The caller will install it and own a ref to it. Since the xfermode may or may not assign
+        *effect, the caller should set *effect to NULL beforehand. background specifies the
+        texture to use as the background for compositing, and should be accessed in the effect's
+        fragment shader. If NULL, the effect should request access to destination color
+        (setWillReadDstColor()), and use that in the fragment shader (builder->dstColor()).
+     */
+    virtual bool asNewEffect(GrEffectRef** effect, GrTexture* background = NULL) const;
+
+    /** Returns true if the xfermode can be expressed as coeffs (src, dst), or as an effect
+        (effect). This helper calls the asCoeff() and asNewEffect() virtuals. If the xfermode is
+        NULL, it is treated as kSrcOver_Mode. It is legal to call this with all params NULL to
+        simply test the return value.  effect, src, and dst must all be NULL or all non-NULL.
+     */
+    static bool AsNewEffectOrCoeff(SkXfermode*,
+                                   GrEffectRef** effect,
+                                   Coeff* src,
+                                   Coeff* dst,
+                                   GrTexture* background = NULL);
+
+    SkDEVCODE(virtual void toString(SkString* str) const = 0;)
+    SK_DECLARE_FLATTENABLE_REGISTRAR_GROUP()
+    SK_DEFINE_FLATTENABLE_TYPE(SkXfermode)
+
 protected:
     SkXfermode(SkFlattenableReadBuffer& rb) : SkFlattenable(rb) {}
 
@@ -184,12 +228,16 @@ protected:
         This method will not be called directly by the client, so it need not
         be implemented if your subclass has overridden xfer32/xfer16/xferA8
     */
-    virtual SkPMColor xferColor(SkPMColor src, SkPMColor dst);
+    virtual SkPMColor xferColor(SkPMColor src, SkPMColor dst) const;
 
 private:
     enum {
         kModeCount = kLastMode + 1
     };
+
+    friend class SkGraphics;
+    static void Term();
+
     typedef SkFlattenable INHERITED;
 };
 
@@ -206,31 +254,30 @@ public:
 
     // overrides from SkXfermode
     virtual void xfer32(SkPMColor dst[], const SkPMColor src[], int count,
-                        const SkAlpha aa[]) SK_OVERRIDE;
+                        const SkAlpha aa[]) const SK_OVERRIDE;
     virtual void xfer16(uint16_t dst[], const SkPMColor src[], int count,
-                        const SkAlpha aa[]) SK_OVERRIDE;
-    virtual void xfer4444(uint16_t dst[], const SkPMColor src[], int count,
-                          const SkAlpha aa[]) SK_OVERRIDE;
+                        const SkAlpha aa[]) const SK_OVERRIDE;
     virtual void xferA8(SkAlpha dst[], const SkPMColor src[], int count,
-                        const SkAlpha aa[]) SK_OVERRIDE;
+                        const SkAlpha aa[]) const SK_OVERRIDE;
 
-    // overrides from SkFlattenable
-    virtual Factory getFactory() SK_OVERRIDE { return CreateProc; }
-    virtual void    flatten(SkFlattenableWriteBuffer&) SK_OVERRIDE;
+    SK_DEVELOPER_TO_STRING()
+    SK_DECLARE_PUBLIC_FLATTENABLE_DESERIALIZATION_PROCS(SkProcXfermode)
 
 protected:
     SkProcXfermode(SkFlattenableReadBuffer&);
+    virtual void flatten(SkFlattenableWriteBuffer&) const SK_OVERRIDE;
 
     // allow subclasses to update this after we unflatten
     void setProc(SkXfermodeProc proc) {
         fProc = proc;
     }
 
+    SkXfermodeProc getProc() const {
+        return fProc;
+    }
+
 private:
     SkXfermodeProc  fProc;
-
-    static SkFlattenable* CreateProc(SkFlattenableReadBuffer& buffer) {
-        return SkNEW_ARGS(SkProcXfermode, (buffer)); }
 
     typedef SkXfermode INHERITED;
 };

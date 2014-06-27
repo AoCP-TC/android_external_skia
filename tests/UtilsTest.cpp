@@ -1,11 +1,12 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
+
 #include "Test.h"
+#include "TestClassDef.h"
 #include "SkRandom.h"
 #include "SkRefCnt.h"
 #include "SkTSearch.h"
@@ -14,41 +15,16 @@
 
 class RefClass : public SkRefCnt {
 public:
+    SK_DECLARE_INST_COUNT(RefClass)
+
     RefClass(int n) : fN(n) {}
     int get() const { return fN; }
 
 private:
     int fN;
+
+    typedef SkRefCnt INHERITED;
 };
-
-static void test_refptr(skiatest::Reporter* reporter) {
-    RefClass* r0 = new RefClass(0);
-
-    SkRefPtr<RefClass> rc0;
-    REPORTER_ASSERT(reporter, rc0.get() == NULL);
-    REPORTER_ASSERT(reporter, !rc0);
-
-    SkRefPtr<RefClass> rc1;
-    REPORTER_ASSERT(reporter, rc0 == rc1);
-    REPORTER_ASSERT(reporter, rc0.get() != r0);
-
-    rc0 = r0;
-    REPORTER_ASSERT(reporter, rc0);
-    REPORTER_ASSERT(reporter, rc0 != rc1);
-    REPORTER_ASSERT(reporter, rc0.get() == r0);
-
-    rc1 = rc0;
-    REPORTER_ASSERT(reporter, rc1);
-    REPORTER_ASSERT(reporter, rc0 == rc1);
-    REPORTER_ASSERT(reporter, rc0.get() == r0);
-
-    rc0 = NULL;
-    REPORTER_ASSERT(reporter, rc0.get() == NULL);
-    REPORTER_ASSERT(reporter, !rc0);
-    REPORTER_ASSERT(reporter, rc0 != rc1);
-
-    r0->unref();
-}
 
 static void test_autounref(skiatest::Reporter* reporter) {
     RefClass obj(0);
@@ -69,6 +45,75 @@ static void test_autounref(skiatest::Reporter* reporter) {
         SkAutoTUnref<RefClass> tmp2(&obj);
     }
     REPORTER_ASSERT(reporter, 1 == obj.getRefCnt());
+}
+
+static void test_autostarray(skiatest::Reporter* reporter) {
+    RefClass obj0(0);
+    RefClass obj1(1);
+    REPORTER_ASSERT(reporter, 1 == obj0.getRefCnt());
+    REPORTER_ASSERT(reporter, 1 == obj1.getRefCnt());
+
+    {
+        SkAutoSTArray<2, SkRefPtr<RefClass> > tmp;
+        REPORTER_ASSERT(reporter, 0 == tmp.count());
+
+        tmp.reset(0);   // test out reset(0) when already at 0
+        tmp.reset(4);   // this should force a new allocation
+        REPORTER_ASSERT(reporter, 4 == tmp.count());
+        tmp[0] = &obj0;
+        tmp[1] = &obj1;
+        REPORTER_ASSERT(reporter, 2 == obj0.getRefCnt());
+        REPORTER_ASSERT(reporter, 2 == obj1.getRefCnt());
+
+        // test out reset with data in the array (and a new allocation)
+        tmp.reset(0);
+        REPORTER_ASSERT(reporter, 0 == tmp.count());
+        REPORTER_ASSERT(reporter, 1 == obj0.getRefCnt());
+        REPORTER_ASSERT(reporter, 1 == obj1.getRefCnt());
+
+        tmp.reset(2);   // this should use the preexisting allocation
+        REPORTER_ASSERT(reporter, 2 == tmp.count());
+        tmp[0] = &obj0;
+        tmp[1] = &obj1;
+    }
+
+    // test out destructor with data in the array (and using existing allocation)
+    REPORTER_ASSERT(reporter, 1 == obj0.getRefCnt());
+    REPORTER_ASSERT(reporter, 1 == obj1.getRefCnt());
+
+    {
+        // test out allocating ctor (this should allocate new memory)
+        SkAutoSTArray<2, SkRefPtr<RefClass> > tmp(4);
+        REPORTER_ASSERT(reporter, 4 == tmp.count());
+
+        tmp[0] = &obj0;
+        tmp[1] = &obj1;
+        REPORTER_ASSERT(reporter, 2 == obj0.getRefCnt());
+        REPORTER_ASSERT(reporter, 2 == obj1.getRefCnt());
+
+        // Test out resut with data in the array and malloced storage
+        tmp.reset(0);
+        REPORTER_ASSERT(reporter, 1 == obj0.getRefCnt());
+        REPORTER_ASSERT(reporter, 1 == obj1.getRefCnt());
+
+        tmp.reset(2);   // this should use the preexisting storage
+        tmp[0] = &obj0;
+        tmp[1] = &obj1;
+        REPORTER_ASSERT(reporter, 2 == obj0.getRefCnt());
+        REPORTER_ASSERT(reporter, 2 == obj1.getRefCnt());
+
+        tmp.reset(4);   // this should force a new malloc
+        REPORTER_ASSERT(reporter, 1 == obj0.getRefCnt());
+        REPORTER_ASSERT(reporter, 1 == obj1.getRefCnt());
+
+        tmp[0] = &obj0;
+        tmp[1] = &obj1;
+        REPORTER_ASSERT(reporter, 2 == obj0.getRefCnt());
+        REPORTER_ASSERT(reporter, 2 == obj1.getRefCnt());
+    }
+
+    REPORTER_ASSERT(reporter, 1 == obj0.getRefCnt());
+    REPORTER_ASSERT(reporter, 1 == obj1.getRefCnt());
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -139,7 +184,7 @@ static void test_utf16(skiatest::Reporter* reporter) {
     }
 }
 
-static void TestUTF(skiatest::Reporter* reporter) {
+DEF_TEST(Utils, reporter) {
     static const struct {
         const char* fUtf8;
         SkUnichar   fUni;
@@ -172,9 +217,6 @@ static void TestUTF(skiatest::Reporter* reporter) {
 
     test_utf16(reporter);
     test_search(reporter);
-    test_refptr(reporter);
     test_autounref(reporter);
+    test_autostarray(reporter);
 }
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("Utils", UtfTestClass, TestUTF)

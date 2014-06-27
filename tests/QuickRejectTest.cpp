@@ -5,9 +5,10 @@
  * found in the LICENSE file.
  */
 
+#include "Test.h"
+#include "TestClassDef.h"
 #include "SkCanvas.h"
 #include "SkDrawLooper.h"
-#include "Test.h"
 
 /*
  *  Subclass of looper that just draws once, with an offset in X.
@@ -29,9 +30,13 @@ public:
         return false;
     }
 
-    virtual Factory getFactory() SK_OVERRIDE {
-        return NULL;
+#ifdef SK_DEVELOPER
+    virtual void toString(SkString* str) const SK_OVERRIDE {
+        str->append("TestLooper:");
     }
+#endif
+
+    SK_DECLARE_UNFLATTENABLE_OBJECT()
 };
 
 static void test_drawBitmap(skiatest::Reporter* reporter) {
@@ -43,7 +48,7 @@ static void test_drawBitmap(skiatest::Reporter* reporter) {
     SkBitmap dst;
     dst.setConfig(SkBitmap::kARGB_8888_Config, 10, 10);
     dst.allocPixels();
-    dst.eraseColor(0);
+    dst.eraseColor(SK_ColorTRANSPARENT);
 
     SkCanvas canvas(dst);
     SkPaint  paint;
@@ -56,7 +61,7 @@ static void test_drawBitmap(skiatest::Reporter* reporter) {
     REPORTER_ASSERT(reporter, 0xFFFFFFFF == *dst.getAddr32(5, 5));
 
     // reverify we are clear again
-    dst.eraseColor(0);
+    dst.eraseColor(SK_ColorTRANSPARENT);
     REPORTER_ASSERT(reporter, 0 == *dst.getAddr32(5, 5));
 
     // if the bitmap is clipped out, we don't draw it
@@ -72,9 +77,6 @@ static void test_drawBitmap(skiatest::Reporter* reporter) {
     REPORTER_ASSERT(reporter, 0xFFFFFFFF == *dst.getAddr32(5, 5));
 }
 
-static void test(skiatest::Reporter* reporter) {
+DEF_TEST(QuickReject, reporter) {
     test_drawBitmap(reporter);
 }
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("QuickReject", QuickRejectClass, test)

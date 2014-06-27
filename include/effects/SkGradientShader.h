@@ -1,11 +1,9 @@
-
 /*
  * Copyright 2006 The Android Open Source Project
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
-
 
 #ifndef SkGradientShader_DEFINED
 #define SkGradientShader_DEFINED
@@ -21,6 +19,15 @@ class SkUnitMapper;
 */
 class SK_API SkGradientShader {
 public:
+    enum Flags {
+        /** By default gradients will interpolate their colors in unpremul space
+         *  and then premultiply each of the results. By setting this flag, the
+         *  gradients will premultiply their colors first, and then interpolate
+         *  between them.
+         */
+        kInterpolateColorsInPremul_Flag = 1 << 0,
+    };
+
     /** Returns a shader that generates a linear gradient between the two
         specified points.
         <p />
@@ -34,14 +41,15 @@ public:
                         the the colors are distributed evenly between the start and end point.
                         If this is not null, the values must begin with 0, end with 1.0, and
                         intermediate values must be strictly increasing.
-        @param  count   Must be >=2. The number of colors (and pos if not NULL) entries. 
+        @param  count   Must be >=2. The number of colors (and pos if not NULL) entries.
         @param  mode    The tiling mode
         @param  mapper  May be NULL. Callback to modify the spread of the colors.
     */
-    static SkShader* CreateLinear(  const SkPoint pts[2],
-                                    const SkColor colors[], const SkScalar pos[], int count,
-                                    SkShader::TileMode mode,
-                                    SkUnitMapper* mapper = NULL);
+    static SkShader* CreateLinear(const SkPoint pts[2],
+                                  const SkColor colors[], const SkScalar pos[], int count,
+                                  SkShader::TileMode mode,
+                                  SkUnitMapper* mapper = NULL,
+                                  uint32_t flags = 0);
 
     /** Returns a shader that generates a radial gradient given the center and radius.
         <p />
@@ -60,10 +68,11 @@ public:
         @param  mode    The tiling mode
         @param  mapper  May be NULL. Callback to modify the spread of the colors.
     */
-    static SkShader* CreateRadial(  const SkPoint& center, SkScalar radius,
-                                    const SkColor colors[], const SkScalar pos[], int count,
-                                    SkShader::TileMode mode,
-                                    SkUnitMapper* mapper = NULL);
+    static SkShader* CreateRadial(const SkPoint& center, SkScalar radius,
+                                  const SkColor colors[], const SkScalar pos[], int count,
+                                  SkShader::TileMode mode,
+                                  SkUnitMapper* mapper = NULL,
+                                  uint32_t flags = 0);
 
     /** Returns a shader that generates a radial gradient given the start position, start radius, end position and end radius.
         <p />
@@ -92,7 +101,25 @@ public:
                                           const SkColor colors[],
                                           const SkScalar pos[], int count,
                                           SkShader::TileMode mode,
-                                          SkUnitMapper* mapper = NULL);
+                                          SkUnitMapper* mapper = NULL,
+                                          uint32_t flags = 0);
+
+    /**
+     *  Returns a shader that generates a conical gradient given two circles, or
+     *  returns NULL if the inputs are invalid. The gradient interprets the
+     *  two circles according to the following HTML spec.
+     *  http://dev.w3.org/html5/2dcontext/#dom-context-2d-createradialgradient
+     */
+    static SkShader* CreateTwoPointConical(const SkPoint& start,
+                                           SkScalar startRadius,
+                                           const SkPoint& end,
+                                           SkScalar endRadius,
+                                           const SkColor colors[],
+                                           const SkScalar pos[], int count,
+                                           SkShader::TileMode mode,
+                                           SkUnitMapper* mapper = NULL,
+                                           uint32_t flags = 0);
+
     /** Returns a shader that generates a sweep gradient given a center.
         <p />
         CreateSweep returns a shader with a reference count of 1.
@@ -111,10 +138,10 @@ public:
     */
     static SkShader* CreateSweep(SkScalar cx, SkScalar cy,
                                  const SkColor colors[], const SkScalar pos[],
-                                 int count, SkUnitMapper* mapper = NULL);
+                                 int count, SkUnitMapper* mapper = NULL,
+                                 uint32_t flags = 0);
 
-    SK_DECLARE_FLATTENABLE_REGISTRAR()
+    SK_DECLARE_FLATTENABLE_REGISTRAR_GROUP()
 };
 
 #endif
-

@@ -76,4 +76,3 @@ SkTextLayout::Line::~Line() {
 
 void SkTextLayout::draw(SkCanvas* canvas) {
 }
-

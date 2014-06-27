@@ -39,7 +39,7 @@ static bool operator==(const SkMask& a, const SkMask& b) {
             wbytes <<= 2;
             break;
         default:
-            SkASSERT(!"unknown mask format");
+            SkDEBUGFAIL("unknown mask format");
             return false;
     }
 
@@ -272,10 +272,12 @@ static void test_irect(skiatest::Reporter* reporter) {
             }
             REPORTER_ASSERT(reporter, nonEmptyAA == nonEmptyBW);
             REPORTER_ASSERT(reporter, clip2.getBounds() == rgn2.getBounds());
-            
+
             SkMask maskBW, maskAA;
             copyToMask(rgn2, &maskBW);
             clip2.copyToMask(&maskAA);
+            SkAutoMaskFreeImage freeBW(maskBW.fImage);
+            SkAutoMaskFreeImage freeAA(maskAA.fImage);
             REPORTER_ASSERT(reporter, maskBW == maskAA);
         }
     }
@@ -305,36 +307,100 @@ static void test_path_with_hole(skiatest::Reporter* reporter) {
     for (int i = 0; i < 2; ++i) {
         SkAAClip clip;
         clip.setPath(path, NULL, 1 == i);
-        
+
         SkMask mask;
         clip.copyToMask(&mask);
-        
+        SkAutoMaskFreeImage freeM(mask.fImage);
+
         REPORTER_ASSERT(reporter, expected == mask);
     }
 }
 
-static void test_regressions(skiatest::Reporter* reporter) {
+#include "SkRasterClip.h"
+
+static void copyToMask(const SkRasterClip& rc, SkMask* mask) {
+    if (rc.isAA()) {
+        rc.aaRgn().copyToMask(mask);
+    } else {
+        copyToMask(rc.bwRgn(), mask);
+    }
+}
+
+static bool operator==(const SkRasterClip& a, const SkRasterClip& b) {
+    if (a.isEmpty()) {
+        return b.isEmpty();
+    }
+    if (b.isEmpty()) {
+        return false;
+    }
+
+    SkMask ma, mb;
+    copyToMask(a, &ma);
+    copyToMask(b, &mb);
+    SkAutoMaskFreeImage aCleanUp(ma.fImage);
+    SkAutoMaskFreeImage bCleanUp(mb.fImage);
+
+    return ma == mb;
+}
+
+static void did_dx_affect(skiatest::Reporter* reporter, const SkScalar dx[],
+                          size_t count, bool changed) {
+    SkIRect ir = { 0, 0, 10, 10 };
+
+    for (size_t i = 0; i < count; ++i) {
+        SkRect r;
+        r.set(ir);
+
+        SkRasterClip rc0(ir);
+        SkRasterClip rc1(ir);
+        SkRasterClip rc2(ir);
+
+        rc0.op(r, SkRegion::kIntersect_Op, false);
+        r.offset(dx[i], 0);
+        rc1.op(r, SkRegion::kIntersect_Op, true);
+        r.offset(-2*dx[i], 0);
+        rc2.op(r, SkRegion::kIntersect_Op, true);
+
+        REPORTER_ASSERT(reporter, changed != (rc0 == rc1));
+        REPORTER_ASSERT(reporter, changed != (rc0 == rc2));
+    }
+}
+
+static void test_nearly_integral(skiatest::Reporter* reporter) {
+    // All of these should generate equivalent rasterclips
+
+    static const SkScalar gSafeX[] = {
+        0, SK_Scalar1/1000, SK_Scalar1/100, SK_Scalar1/10,
+    };
+    did_dx_affect(reporter, gSafeX, SK_ARRAY_COUNT(gSafeX), false);
+
+    static const SkScalar gUnsafeX[] = {
+        SK_Scalar1/4, SK_Scalar1/3,
+    };
+    did_dx_affect(reporter, gUnsafeX, SK_ARRAY_COUNT(gUnsafeX), true);
+}
+
+static void test_regressions() {
     // these should not assert in the debug build
     // bug was introduced in rev. 3209
     {
         SkAAClip clip;
         SkRect r;
-        r.fLeft = SkFloatToScalar(129.892181);
-        r.fTop = SkFloatToScalar(10.3999996);
-        r.fRight = SkFloatToScalar(130.892181); 
-        r.fBottom = SkFloatToScalar(20.3999996);
+        r.fLeft = 129.892181f;
+        r.fTop = 10.3999996f;
+        r.fRight = 130.892181f;
+        r.fBottom = 20.3999996f;
         clip.setRect(r, true);
     }
 }
 
-static void TestAAClip(skiatest::Reporter* reporter) {
+#include "TestClassDef.h"
+DEF_TEST(AAClip, reporter) {
     test_empty(reporter);
     test_path_bounds(reporter);
     test_irect(reporter);
     test_rgn(reporter);
     test_path_with_hole(reporter);
-    test_regressions(reporter);
+    test_regressions();
+    test_nearly_integral(reporter);
 }
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("AAClip", AAClipTestClass, TestAAClip)

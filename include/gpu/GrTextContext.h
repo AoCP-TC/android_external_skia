@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2010 Google Inc.
  *
@@ -6,63 +5,36 @@
  * found in the LICENSE file.
  */
 
-
-
 #ifndef GrTextContext_DEFINED
 #define GrTextContext_DEFINED
 
+#include "GrContext.h"
 #include "GrGlyph.h"
 #include "GrPaint.h"
-#include "GrMatrix.h"
 
-struct GrGpuTextVertex;
 class GrContext;
-class GrTextStrike;
-class GrFontScaler;
 class GrDrawTarget;
+class GrFontScaler;
 
+/*
+ * This class wraps the state for a single text render
+ */
 class GrTextContext {
 public:
-    GrTextContext(GrContext*,
-                  const GrPaint& paint,
-                  const GrMatrix* extMatrix = NULL);
-    ~GrTextContext();
+    virtual void drawPackedGlyph(GrGlyph::PackedID, GrFixed left, GrFixed top,
+                                 GrFontScaler*) = 0;
 
-    void drawPackedGlyph(GrGlyph::PackedID, GrFixed left, GrFixed top,
-                         GrFontScaler*);
+protected:
+    GrTextContext(GrContext*, const GrPaint&);
+    virtual ~GrTextContext() {}
 
-    void flush();   // optional; automatically called by destructor
+    GrPaint                fPaint;
+    GrContext*             fContext;
+    GrDrawTarget*          fDrawTarget;
+
+    SkIRect                fClipRect;
 
 private:
-    GrPaint         fPaint;
-    GrVertexLayout  fVertexLayout;
-    GrContext*      fContext;
-    GrDrawTarget*   fDrawTarget;
-
-    GrMatrix        fExtMatrix;
-    GrFontScaler*   fScaler;
-    GrTextStrike*   fStrike;
-
-    inline void flushGlyphs();
-    void setupDrawTarget();
-
-    enum {
-        kMinRequestedGlyphs      = 1,
-        kDefaultRequestedGlyphs  = 64,
-        kMinRequestedVerts       = kMinRequestedGlyphs * 4,
-        kDefaultRequestedVerts   = kDefaultRequestedGlyphs * 4,
-    };
-
-    GrGpuTextVertex* fVertices;
-
-    int32_t     fMaxVertices;
-    GrTexture*  fCurrTexture;
-    int         fCurrVertex;
-
-    GrIRect     fClipRect;
-    GrMatrix    fOrigViewMatrix;    // restore previous viewmatrix
 };
 
 #endif
-
-

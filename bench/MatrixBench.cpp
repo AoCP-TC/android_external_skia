@@ -7,15 +7,19 @@
  */
 #include "SkBenchmark.h"
 #include "SkMatrix.h"
+#include "SkMatrixUtils.h"
 #include "SkRandom.h"
 #include "SkString.h"
 
 class MatrixBench : public SkBenchmark {
     SkString    fName;
-    enum { N = 100000 };
 public:
-    MatrixBench(void* param, const char name[]) : INHERITED(param) {
+    MatrixBench(const char name[])  {
         fName.printf("matrix_%s", name);
+    }
+
+    virtual bool isSuitableFor(Backend backend) SK_OVERRIDE {
+        return backend == kNonRendering_Backend;
     }
 
     virtual void performTest() = 0;
@@ -27,9 +31,8 @@ protected:
         return fName.c_str();
     }
 
-    virtual void onDraw(SkCanvas* canvas) {
-        int n = SkBENCHLOOP(N * this->mulLoopCount());
-        for (int i = 0; i < n; i++) {
+    virtual void onDraw(const int loops, SkCanvas*) {
+        for (int i = 0; i < loops; i++) {
             this->performTest();
         }
     }
@@ -52,7 +55,7 @@ int gMatrixBench_NonStaticGlobal;
 
 class EqualsMatrixBench : public MatrixBench {
 public:
-    EqualsMatrixBench(void* param) : INHERITED(param, "equals") {}
+    EqualsMatrixBench() : INHERITED("equals") {}
 protected:
     virtual void performTest() {
         SkMatrix m0, m1, m2;
@@ -70,8 +73,8 @@ private:
 
 class ScaleMatrixBench : public MatrixBench {
 public:
-    ScaleMatrixBench(void* param) : INHERITED(param, "scale") {
-        fSX = fSY = SkFloatToScalar(1.5f);
+    ScaleMatrixBench() : INHERITED("scale") {
+        fSX = fSY = 1.5f;
         fM0.reset();
         fM1.setScale(fSX, fSY);
         fM2.setTranslate(fSX, fSY);
@@ -103,7 +106,7 @@ template <typename T> void init9(T array[9]) {
 // using floating point precision only.
 class FloatConcatMatrixBench : public MatrixBench {
 public:
-    FloatConcatMatrixBench(void* p) : INHERITED(p, "concat_floatfloat") {
+    FloatConcatMatrixBench() : INHERITED("concat_floatfloat") {
         init9(mya);
         init9(myb);
         init9(myr);
@@ -146,7 +149,7 @@ static inline float SkDoubleToFloat(double x) {
 // intermediate results during computations.
 class FloatDoubleConcatMatrixBench : public MatrixBench {
 public:
-    FloatDoubleConcatMatrixBench(void* p) : INHERITED(p, "concat_floatdouble") {
+    FloatDoubleConcatMatrixBench() : INHERITED("concat_floatdouble") {
         init9(mya);
         init9(myb);
         init9(myr);
@@ -184,7 +187,7 @@ private:
 // using double precision only.
 class DoubleConcatMatrixBench : public MatrixBench {
 public:
-    DoubleConcatMatrixBench(void* p) : INHERITED(p, "concat_double") {
+    DoubleConcatMatrixBench() : INHERITED("concat_double") {
         init9(mya);
         init9(myb);
         init9(myr);
@@ -220,8 +223,8 @@ private:
 
 class GetTypeMatrixBench : public MatrixBench {
 public:
-    GetTypeMatrixBench(void* param)
-        : INHERITED(param, "gettype") {
+    GetTypeMatrixBench()
+        : INHERITED("gettype") {
         fArray[0] = (float) fRnd.nextS();
         fArray[1] = (float) fRnd.nextS();
         fArray[2] = (float) fRnd.nextS();
@@ -263,15 +266,14 @@ private:
     typedef MatrixBench INHERITED;
 };
 
-#ifdef SK_SCALAR_IS_FLOAT
 class ScaleTransMixedMatrixBench : public MatrixBench {
  public:
-    ScaleTransMixedMatrixBench(void* p) : INHERITED(p, "scaletrans_mixed"), fCount (16) {
+    ScaleTransMixedMatrixBench() : INHERITED("scaletrans_mixed") {
         fMatrix.setAll(fRandom.nextSScalar1(), fRandom.nextSScalar1(), fRandom.nextSScalar1(),
                        fRandom.nextSScalar1(), fRandom.nextSScalar1(), fRandom.nextSScalar1(),
                        fRandom.nextSScalar1(), fRandom.nextSScalar1(), fRandom.nextSScalar1());
         int i;
-        for (i = 0; i < SkBENCHLOOP(fCount); i++) {
+        for (i = 0; i < kCount; i++) {
             fSrc[i].fX = fRandom.nextSScalar1();
             fSrc[i].fY = fRandom.nextSScalar1();
             fDst[i].fX = fRandom.nextSScalar1();
@@ -282,7 +284,7 @@ class ScaleTransMixedMatrixBench : public MatrixBench {
     virtual void performTest() {
         SkPoint* dst = fDst;
         const SkPoint* src = fSrc;
-        int count = SkBENCHLOOP(fCount);
+        int count = kCount;
         float mx = fMatrix[SkMatrix::kMScaleX];
         float my = fMatrix[SkMatrix::kMScaleY];
         float tx = fMatrix[SkMatrix::kMTransX];
@@ -295,20 +297,22 @@ class ScaleTransMixedMatrixBench : public MatrixBench {
         } while (--count);
     }
  private:
+    enum {
+        kCount = 16
+    };
     SkMatrix fMatrix;
-    SkPoint fSrc [16];
-    SkPoint fDst [16];
-    int fCount;
+    SkPoint fSrc [kCount];
+    SkPoint fDst [kCount];
     SkRandom fRandom;
     typedef MatrixBench INHERITED;
 };
 
 class ScaleTransDoubleMatrixBench : public MatrixBench {
  public:
-    ScaleTransDoubleMatrixBench(void* p) : INHERITED(p, "scaletrans_double"), fCount (16) {
+    ScaleTransDoubleMatrixBench() : INHERITED("scaletrans_double") {
         init9(fMatrix);
         int i;
-        for (i = 0; i < SkBENCHLOOP(fCount); i++) {
+        for (i = 0; i < kCount; i++) {
             fSrc[i].fX = fRandom.nextSScalar1();
             fSrc[i].fY = fRandom.nextSScalar1();
             fDst[i].fX = fRandom.nextSScalar1();
@@ -319,7 +323,7 @@ class ScaleTransDoubleMatrixBench : public MatrixBench {
     virtual void performTest() {
         SkPoint* dst = fDst;
         const SkPoint* src = fSrc;
-        int count = SkBENCHLOOP(fCount);
+        int count = kCount;
         // As doubles, on Z600 Linux systems this is 2.5x as expensive as mixed mode
         float mx = (float) fMatrix[SkMatrix::kMScaleX];
         float my = (float) fMatrix[SkMatrix::kMScaleY];
@@ -333,36 +337,142 @@ class ScaleTransDoubleMatrixBench : public MatrixBench {
         } while (--count);
     }
  private:
+    enum {
+        kCount = 16
+    };
     double fMatrix [9];
-    SkPoint fSrc [16];
-    SkPoint fDst [16];
-    int fCount;
+    SkPoint fSrc [kCount];
+    SkPoint fDst [kCount];
     SkRandom fRandom;
     typedef MatrixBench INHERITED;
 };
-#endif
 
+class DecomposeMatrixBench : public MatrixBench {
+public:
+    DecomposeMatrixBench() : INHERITED("decompose") {}
 
+protected:
+    virtual void onPreDraw() {
+        for (int i = 0; i < 10; ++i) {
+            SkScalar rot0 = (fRandom.nextBool()) ? fRandom.nextRangeF(-180, 180) : 0.0f;
+            SkScalar sx = fRandom.nextRangeF(-3000.f, 3000.f);
+            SkScalar sy = (fRandom.nextBool()) ? fRandom.nextRangeF(-3000.f, 3000.f) : sx;
+            SkScalar rot1 = fRandom.nextRangeF(-180, 180);
+            fMatrix[i].setRotate(rot0);
+            fMatrix[i].postScale(sx, sy);
+            fMatrix[i].postRotate(rot1);
+        }
+    }
+    virtual void performTest() {
+        SkPoint rotation1, scale, rotation2;
+        for (int i = 0; i < 10; ++i) {
+            (void) SkDecomposeUpper2x2(fMatrix[i], &rotation1, &scale, &rotation2);
+        }
+    }
+private:
+    SkMatrix fMatrix[10];
+    SkRandom fRandom;
+    typedef MatrixBench INHERITED;
+};
 
+class InvertMapRectMatrixBench : public MatrixBench {
+public:
+    InvertMapRectMatrixBench(const char* name, int flags)
+        : INHERITED(name)
+        , fFlags(flags) {
+        fMatrix.reset();
+        fIteration = 0;
+        if (flags & kScale_Flag) {
+            fMatrix.postScale(1.5f, 2.5f);
+        }
+        if (flags & kTranslate_Flag) {
+            fMatrix.postTranslate(1.5f, 2.5f);
+        }
+        if (flags & kRotate_Flag) {
+            fMatrix.postRotate(45.0f);
+        }
+        if (flags & kPerspective_Flag) {
+            fMatrix.setPerspX(1.5f);
+            fMatrix.setPerspY(2.5f);
+        }
+        if (0 == (flags & kUncachedTypeMask_Flag)) {
+            fMatrix.getType();
+        }
+    }
+    enum Flag {
+        kScale_Flag             = 0x01,
+        kTranslate_Flag         = 0x02,
+        kRotate_Flag            = 0x04,
+        kPerspective_Flag       = 0x08,
+        kUncachedTypeMask_Flag  = 0x10,
+    };
+protected:
+    virtual void performTest() {
+        if (fFlags & kUncachedTypeMask_Flag) {
+            // This will invalidate the typemask without
+            // changing the matrix.
+            fMatrix.setPerspX(fMatrix.getPerspX());
+        }
+        SkMatrix inv;
+        bool invertible = fMatrix.invert(&inv);
+        SkASSERT(invertible);
+        SkRect transformedRect;
+        // an arbitrary, small, non-zero rect to transform
+        SkRect srcRect = SkRect::MakeWH(SkIntToScalar(10), SkIntToScalar(10));
+        if (invertible) {
+            inv.mapRect(&transformedRect, srcRect);
+        }
+    }
+private:
+    SkMatrix fMatrix;
+    int fFlags;
+    unsigned fIteration;
+    typedef MatrixBench INHERITED;
+};
 
+///////////////////////////////////////////////////////////////////////////////
 
-static SkBenchmark* M0(void* p) { return new EqualsMatrixBench(p); }
-static SkBenchmark* M1(void* p) { return new ScaleMatrixBench(p); }
-static SkBenchmark* M2(void* p) { return new FloatConcatMatrixBench(p); }
-static SkBenchmark* M3(void* p) { return new FloatDoubleConcatMatrixBench(p); }
-static SkBenchmark* M4(void* p) { return new DoubleConcatMatrixBench(p); }
-static SkBenchmark* M5(void* p) { return new GetTypeMatrixBench(p); }
+DEF_BENCH( return new EqualsMatrixBench(); )
+DEF_BENCH( return new ScaleMatrixBench(); )
+DEF_BENCH( return new FloatConcatMatrixBench(); )
+DEF_BENCH( return new FloatDoubleConcatMatrixBench(); )
+DEF_BENCH( return new DoubleConcatMatrixBench(); )
+DEF_BENCH( return new GetTypeMatrixBench(); )
+DEF_BENCH( return new DecomposeMatrixBench(); )
 
-static BenchRegistry gReg0(M0);
-static BenchRegistry gReg1(M1);
-static BenchRegistry gReg2(M2);
-static BenchRegistry gReg3(M3);
-static BenchRegistry gReg4(M4);
-static BenchRegistry gReg5(M5);
+DEF_BENCH( return new InvertMapRectMatrixBench("invert_maprect_identity", 0); )
 
-#ifdef SK_SCALAR_IS_FLOAT
-static SkBenchmark* FlM0(void* p) { return new ScaleTransMixedMatrixBench(p); }
-static SkBenchmark* FlM1(void* p) { return new ScaleTransDoubleMatrixBench(p); }
-static BenchRegistry gFlReg5(FlM0);
-static BenchRegistry gFlReg6(FlM1);
-#endif
+DEF_BENCH(return new InvertMapRectMatrixBench(
+                                  "invert_maprect_rectstaysrect",
+                                  InvertMapRectMatrixBench::kScale_Flag |
+                                  InvertMapRectMatrixBench::kTranslate_Flag); )
+
+DEF_BENCH(return new InvertMapRectMatrixBench(
+                                  "invert_maprect_translate",
+                                  InvertMapRectMatrixBench::kTranslate_Flag); )
+
+DEF_BENCH(return new InvertMapRectMatrixBench(
+                                  "invert_maprect_nonpersp",
+                                  InvertMapRectMatrixBench::kScale_Flag |
+                                  InvertMapRectMatrixBench::kRotate_Flag |
+                                  InvertMapRectMatrixBench::kTranslate_Flag); )
+
+DEF_BENCH( return new InvertMapRectMatrixBench(
+                               "invert_maprect_persp",
+                               InvertMapRectMatrixBench::kPerspective_Flag); )
+
+DEF_BENCH( return new InvertMapRectMatrixBench(
+                           "invert_maprect_typemask_rectstaysrect",
+                           InvertMapRectMatrixBench::kUncachedTypeMask_Flag |
+                           InvertMapRectMatrixBench::kScale_Flag |
+                           InvertMapRectMatrixBench::kTranslate_Flag); )
+
+DEF_BENCH( return new InvertMapRectMatrixBench(
+                           "invert_maprect_typemask_nonpersp",
+                           InvertMapRectMatrixBench::kUncachedTypeMask_Flag |
+                           InvertMapRectMatrixBench::kScale_Flag |
+                           InvertMapRectMatrixBench::kRotate_Flag |
+                           InvertMapRectMatrixBench::kTranslate_Flag); )
+
+DEF_BENCH( return new ScaleTransMixedMatrixBench(); )
+DEF_BENCH( return new ScaleTransDoubleMatrixBench(); )

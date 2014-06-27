@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2008 The Android Open Source Project
  *
@@ -6,13 +5,15 @@
  * found in the LICENSE file.
  */
 
-
+#include "SkCGUtils.h"
+#include "SkColorPriv.h"
 #include "SkImageDecoder.h"
 #include "SkImageEncoder.h"
 #include "SkMovie.h"
 #include "SkStream.h"
+#include "SkStreamHelpers.h"
 #include "SkTemplates.h"
-#include "SkCGUtils.h"
+#include "SkUnPreMultiply.h"
 
 #ifdef SK_BUILD_FOR_MAC
 #include <ApplicationServices/ApplicationServices.h>
@@ -20,6 +21,8 @@
 
 #ifdef SK_BUILD_FOR_IOS
 #include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
+#include <MobileCoreServices/MobileCoreServices.h>
 #endif
 
 static void malloc_release_proc(void* info, const void* data, size_t size) {
@@ -28,10 +31,10 @@ static void malloc_release_proc(void* info, const void* data, size_t size) {
 
 static CGDataProviderRef SkStreamToDataProvider(SkStream* stream) {
     // TODO: use callbacks, so we don't have to load all the data into RAM
-    size_t len = stream->getLength();
-    void* data = sk_malloc_throw(len);
-    stream->read(data, len);
-    
+    SkAutoMalloc storage;
+    const size_t len = CopyStreamToStorage(&storage, stream);
+    void* data = storage.detach();
+
     return CGDataProviderCreateWithData(data, data, len, malloc_release_proc);
 }
 
@@ -47,6 +50,17 @@ protected:
     virtual bool onDecode(SkStream* stream, SkBitmap* bm, Mode);
 };
 
+// Returns an unpremultiplied version of color. It will have the same ordering and size as an
+// SkPMColor, but the alpha will not be premultiplied.
+static SkPMColor unpremultiply_pmcolor(SkPMColor color) {
+    U8CPU a = SkGetPackedA32(color);
+    const SkUnPreMultiply::Scale scale = SkUnPreMultiply::GetScale(a);
+    return SkPackARGB32NoCheck(a,
+                               SkUnPreMultiply::ApplyScale(scale, SkGetPackedR32(color)),
+                               SkUnPreMultiply::ApplyScale(scale, SkGetPackedG32(color)),
+                               SkUnPreMultiply::ApplyScale(scale, SkGetPackedB32(color)));
+}
+
 #define BITMAP_INFO (kCGBitmapByteOrder32Big | kCGImageAlphaPremultipliedLast)
 
 bool SkImageDecoder_CG::onDecode(SkStream* stream, SkBitmap* bm, Mode mode) {
@@ -56,47 +70,80 @@ bool SkImageDecoder_CG::onDecode(SkStream* stream, SkBitmap* bm, Mode mode) {
         return false;
     }
     SkAutoTCallVProc<const void, CFRelease> arsrc(imageSrc);
-    
+
     CGImageRef image = CGImageSourceCreateImageAtIndex(imageSrc, 0, NULL);
     if (NULL == image) {
         return false;
     }
     SkAutoTCallVProc<CGImage, CGImageRelease> arimage(image);
-    
+
     const int width = CGImageGetWidth(image);
     const int height = CGImageGetHeight(image);
     bm->setConfig(SkBitmap::kARGB_8888_Config, width, height);
     if (SkImageDecoder::kDecodeBounds_Mode == mode) {
         return true;
     }
-    
+
     if (!this->allocPixelRef(bm, NULL)) {
         return false;
     }
-    
-    bm->lockPixels();
-    bm->eraseColor(0);
 
-    // use the same colorspace, so we don't change the pixels at all
-    CGColorSpaceRef cs = CGImageGetColorSpace(image);
-    CGContextRef cg = CGBitmapContextCreate(bm->getPixels(), width, height,
-                                            8, bm->rowBytes(), cs, BITMAP_INFO);
+    bm->lockPixels();
+    bm->eraseColor(SK_ColorTRANSPARENT);
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef cg = CGBitmapContextCreate(bm->getPixels(), width, height, 8, bm->rowBytes(), cs, BITMAP_INFO);
+    CFRelease(cs);
+
     CGContextDrawImage(cg, CGRectMake(0, 0, width, height), image);
     CGContextRelease(cg);
 
+    CGImageAlphaInfo info = CGImageGetAlphaInfo(image);
+    switch (info) {
+        case kCGImageAlphaNone:
+        case kCGImageAlphaNoneSkipLast:
+        case kCGImageAlphaNoneSkipFirst:
+            SkASSERT(SkBitmap::ComputeIsOpaque(*bm));
+            bm->setAlphaType(kOpaque_SkAlphaType);
+            break;
+        default:
+            // we don't know if we're opaque or not, so compute it.
+            if (SkBitmap::ComputeIsOpaque(*bm)) {
+                bm->setAlphaType(kOpaque_SkAlphaType);
+            }
+    }
+    if (!bm->isOpaque() && this->getRequireUnpremultipliedColors()) {
+        // CGBitmapContext does not support unpremultiplied, so the image has been premultiplied.
+        // Convert to unpremultiplied.
+        for (int i = 0; i < width; ++i) {
+            for (int j = 0; j < height; ++j) {
+                uint32_t* addr = bm->getAddr32(i, j);
+                *addr = unpremultiply_pmcolor(*addr);
+            }
+        }
+        bm->setAlphaType(kUnpremul_SkAlphaType);
+    }
     bm->unlockPixels();
     return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-SkImageDecoder* SkImageDecoder::Factory(SkStream* stream) {
-    return SkNEW(SkImageDecoder_CG);
+extern SkImageDecoder* image_decoder_from_stream(SkStreamRewindable*);
+
+SkImageDecoder* SkImageDecoder::Factory(SkStreamRewindable* stream) {
+    SkImageDecoder* decoder = image_decoder_from_stream(stream);
+    if (NULL == decoder) {
+        // If no image decoder specific to the stream exists, use SkImageDecoder_CG.
+        return SkNEW(SkImageDecoder_CG);
+    } else {
+        return decoder;
+    }
 }
 
 /////////////////////////////////////////////////////////////////////////
 
-SkMovie* SkMovie::DecodeStream(SkStream* stream) {
+SkMovie* SkMovie::DecodeStream(SkStreamRewindable* stream) {
     return NULL;
 }
 
@@ -127,7 +174,7 @@ static CGImageDestinationRef SkStreamToImageDestination(SkWStream* stream,
         return NULL;
     }
     SkAutoTCallVProc<const void, CFRelease> arconsumer(consumer);
-    
+
     return CGImageDestinationCreateWithDataConsumer(consumer, type, 1, NULL);
 }
 
@@ -137,7 +184,7 @@ public:
 
 protected:
     virtual bool onEncode(SkWStream* stream, const SkBitmap& bm, int quality);
-    
+
 private:
     Type fType;
 };
@@ -148,25 +195,47 @@ private:
  */
 bool SkImageEncoder_CG::onEncode(SkWStream* stream, const SkBitmap& bm,
                                  int quality) {
+    // Used for converting a bitmap to 8888.
+    const SkBitmap* bmPtr = &bm;
+    SkBitmap bitmap8888;
+
     CFStringRef type;
     switch (fType) {
+        case kICO_Type:
+            type = kUTTypeICO;
+            break;
+        case kBMP_Type:
+            type = kUTTypeBMP;
+            break;
+        case kGIF_Type:
+            type = kUTTypeGIF;
+            break;
         case kJPEG_Type:
             type = kUTTypeJPEG;
             break;
         case kPNG_Type:
+            // PNG encoding an ARGB_4444 bitmap gives the following errors in GM:
+            // <Error>: CGImageDestinationAddImage image could not be converted to destination
+            // format.
+            // <Error>: CGImageDestinationFinalize image destination does not have enough images
+            // So instead we copy to 8888.
+            if (bm.config() == SkBitmap::kARGB_4444_Config) {
+                bm.copyTo(&bitmap8888, SkBitmap::kARGB_8888_Config);
+                bmPtr = &bitmap8888;
+            }
             type = kUTTypePNG;
             break;
         default:
             return false;
     }
-    
+
     CGImageDestinationRef dst = SkStreamToImageDestination(stream, type);
     if (NULL == dst) {
         return false;
     }
     SkAutoTCallVProc<const void, CFRelease> ardst(dst);
 
-    CGImageRef image = SkCreateCGImageRef(bm);
+    CGImageRef image = SkCreateCGImageRef(*bmPtr);
     if (NULL == image) {
         return false;
     }
@@ -176,10 +245,15 @@ bool SkImageEncoder_CG::onEncode(SkWStream* stream, const SkBitmap& bm,
     return CGImageDestinationFinalize(dst);
 }
 
-SkImageEncoder* SkImageEncoder::Create(Type t) {
+///////////////////////////////////////////////////////////////////////////////
+
+static SkImageEncoder* sk_imageencoder_cg_factory(SkImageEncoder::Type t) {
     switch (t) {
-        case kJPEG_Type:
-        case kPNG_Type:
+        case SkImageEncoder::kICO_Type:
+        case SkImageEncoder::kBMP_Type:
+        case SkImageEncoder::kGIF_Type:
+        case SkImageEncoder::kJPEG_Type:
+        case SkImageEncoder::kPNG_Type:
             break;
         default:
             return NULL;
@@ -187,3 +261,46 @@ SkImageEncoder* SkImageEncoder::Create(Type t) {
     return SkNEW_ARGS(SkImageEncoder_CG, (t));
 }
 
+static SkImageEncoder_EncodeReg gEReg(sk_imageencoder_cg_factory);
+
+struct FormatConversion {
+    CFStringRef             fUTType;
+    SkImageDecoder::Format  fFormat;
+};
+
+// Array of the types supported by the decoder.
+static const FormatConversion gFormatConversions[] = {
+    { kUTTypeBMP, SkImageDecoder::kBMP_Format },
+    { kUTTypeGIF, SkImageDecoder::kGIF_Format },
+    { kUTTypeICO, SkImageDecoder::kICO_Format },
+    { kUTTypeJPEG, SkImageDecoder::kJPEG_Format },
+    // Also include JPEG2000
+    { kUTTypeJPEG2000, SkImageDecoder::kJPEG_Format },
+    { kUTTypePNG, SkImageDecoder::kPNG_Format },
+};
+
+static SkImageDecoder::Format UTType_to_Format(const CFStringRef uttype) {
+    for (size_t i = 0; i < SK_ARRAY_COUNT(gFormatConversions); i++) {
+        if (CFStringCompare(uttype, gFormatConversions[i].fUTType, 0) == kCFCompareEqualTo) {
+            return gFormatConversions[i].fFormat;
+        }
+    }
+    return SkImageDecoder::kUnknown_Format;
+}
+
+static SkImageDecoder::Format get_format_cg(SkStreamRewindable* stream) {
+    CGImageSourceRef imageSrc = SkStreamToCGImageSource(stream);
+
+    if (NULL == imageSrc) {
+        return SkImageDecoder::kUnknown_Format;
+    }
+
+    SkAutoTCallVProc<const void, CFRelease> arsrc(imageSrc);
+    const CFStringRef name = CGImageSourceGetType(imageSrc);
+    if (NULL == name) {
+        return SkImageDecoder::kUnknown_Format;
+    }
+    return UTType_to_Format(name);
+}
+
+static SkImageDecoder_FormatReg gFormatReg(get_format_cg);

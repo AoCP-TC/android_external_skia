@@ -55,7 +55,7 @@ bool SkMovie::setTime(SkMSec time)
     SkMSec dur = this->duration();
     if (time > dur)
         time = dur;
-        
+
     bool changed = false;
     if (time != fCurrTime)
     {
@@ -89,20 +89,7 @@ SkMovie* SkMovie::DecodeMemory(const void* data, size_t length) {
     return SkMovie::DecodeStream(&stream);
 }
 
-SkMovie* SkMovie::DecodeFile(const char path[])
-{
-    SkMovie* movie = NULL;
-
-    SkFILEStream stream(path);
-    if (stream.isValid()) {
-        movie = SkMovie::DecodeStream(&stream);
-    }
-#ifdef SK_DEBUG
-    else {
-        SkDebugf("Movie file not found <%s>\n", path);
-    }
-#endif
-
-    return movie;
+SkMovie* SkMovie::DecodeFile(const char path[]) {
+    SkAutoTUnref<SkStreamRewindable> stream(SkStream::NewFromFile(path));
+    return stream.get() ? SkMovie::DecodeStream(stream) : NULL;
 }
-

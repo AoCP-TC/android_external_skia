@@ -8,15 +8,32 @@
 
 
 #include "SkGlyphCache.h"
+#include "SkGlyphCache_Globals.h"
 #include "SkGraphics.h"
 #include "SkPaint.h"
+#include "SkPath.h"
 #include "SkTemplates.h"
+#include "SkTLS.h"
+#include "SkTypeface.h"
 
 //#define SPEW_PURGE_STATUS
-//#define USE_CACHE_HASH
 //#define RECORD_HASH_EFFICIENCY
 
 bool gSkSuppressFontCachePurgeSpew;
+
+// Returns the shared globals
+static SkGlyphCache_Globals& getSharedGlobals() {
+    // we leak this, so we don't incur any shutdown cost of the destructor
+    static SkGlyphCache_Globals* gGlobals = SkNEW_ARGS(SkGlyphCache_Globals,
+                                                       (SkGlyphCache_Globals::kYes_UseMutex));
+    return *gGlobals;
+}
+
+// Returns the TLS globals (if set), or the shared globals
+static SkGlyphCache_Globals& getGlobals() {
+    SkGlyphCache_Globals* tls = SkGlyphCache_Globals::FindTLS();
+    return tls ? *tls : getSharedGlobals();
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -45,34 +62,59 @@ bool gSkSuppressFontCachePurgeSpew;
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#define kMinGlphAlloc       (sizeof(SkGlyph) * 64)
-#define kMinImageAlloc      (24 * 64)   // should be pointsize-dependent
+// so we don't grow our arrays a lot
+#define kMinGlyphCount      16
+#define kMinGlyphImageSize  (16*2)
+#define kMinAllocAmount     ((sizeof(SkGlyph) + kMinGlyphImageSize) * kMinGlyphCount)
 
-#define METRICS_RESERVE_COUNT  128  // so we don't grow this array a lot
+SkGlyphCache::SkGlyphCache(SkTypeface* typeface, const SkDescriptor* desc, SkScalerContext* ctx)
+        : fScalerContext(ctx), fGlyphAlloc(kMinAllocAmount) {
+    SkASSERT(typeface);
+    SkASSERT(desc);
+    SkASSERT(ctx);
 
-SkGlyphCache::SkGlyphCache(const SkDescriptor* desc)
-        : fGlyphAlloc(kMinGlphAlloc), fImageAlloc(kMinImageAlloc) {
     fPrev = fNext = NULL;
 
     fDesc = desc->copy();
-    fScalerContext = SkScalerContext::Create(desc);
-    fScalerContext->getFontMetrics(NULL, &fFontMetricsY);
+    fScalerContext->getFontMetrics(&fFontMetrics);
 
     // init to 0 so that all of the pointers will be null
     memset(fGlyphHash, 0, sizeof(fGlyphHash));
     // init with 0xFF so that the charCode field will be -1, which is invalid
     memset(fCharToGlyphHash, 0xFF, sizeof(fCharToGlyphHash));
 
-    fMemoryUsed = sizeof(*this) + kMinGlphAlloc + kMinImageAlloc;
+    fMemoryUsed = sizeof(*this);
 
-    fGlyphArray.setReserve(METRICS_RESERVE_COUNT);
+    fGlyphArray.setReserve(kMinGlyphCount);
 
-    fMetricsCount = 0;
-    fAdvanceCount = 0;
     fAuxProcList = NULL;
 }
 
 SkGlyphCache::~SkGlyphCache() {
+#if 0
+    {
+        size_t ptrMem = fGlyphArray.count() * sizeof(SkGlyph*);
+        size_t glyphAlloc = fGlyphAlloc.totalCapacity();
+        size_t glyphHashUsed = 0;
+        size_t uniHashUsed = 0;
+        for (int i = 0; i < kHashCount; ++i) {
+            glyphHashUsed += fGlyphHash[i] ? sizeof(fGlyphHash[0]) : 0;
+            uniHashUsed += fCharToGlyphHash[i].fID != 0xFFFFFFFF ? sizeof(fCharToGlyphHash[0]) : 0;
+        }
+        size_t glyphUsed = fGlyphArray.count() * sizeof(SkGlyph);
+        size_t imageUsed = 0;
+        for (int i = 0; i < fGlyphArray.count(); ++i) {
+            const SkGlyph& g = *fGlyphArray[i];
+            if (g.fImage) {
+                imageUsed += g.fHeight * g.rowBytes();
+            }
+        }
+
+        printf("glyphPtrArray,%zu, Alloc,%zu, imageUsed,%zu, glyphUsed,%zu, glyphHashAlloc,%zu, glyphHashUsed,%zu, unicharHashAlloc,%zu, unicharHashUsed,%zu\n",
+                 ptrMem, glyphAlloc, imageUsed, glyphUsed, sizeof(fGlyphHash), glyphHashUsed, sizeof(fCharToGlyphHash), uniHashUsed);
+
+    }
+#endif
     SkGlyph**   gptr = fGlyphArray.begin();
     SkGlyph**   stop = fGlyphArray.end();
     while (gptr < stop) {
@@ -276,11 +318,9 @@ SkGlyph* SkGlyphCache::lookupMetrics(uint32_t id, MetricsType mtype) {
 
     if (kJustAdvance_MetricsType == mtype) {
         fScalerContext->getAdvance(glyph);
-        fAdvanceCount += 1;
     } else {
         SkASSERT(kFull_MetricsType == mtype);
         fScalerContext->getMetrics(glyph);
-        fMetricsCount += 1;
     }
 
     return glyph;
@@ -290,7 +330,7 @@ const void* SkGlyphCache::findImage(const SkGlyph& glyph) {
     if (glyph.fWidth > 0 && glyph.fWidth < kMaxGlyphWidth) {
         if (glyph.fImage == NULL) {
             size_t  size = glyph.computeImageSize();
-            const_cast<SkGlyph&>(glyph).fImage = fImageAlloc.alloc(size,
+            const_cast<SkGlyph&>(glyph).fImage = fGlyphAlloc.alloc(size,
                                         SkChunkAlloc::kReturnNil_AllocFailType);
             // check that alloc() actually succeeded
             if (glyph.fImage) {
@@ -312,7 +352,7 @@ const SkPath* SkGlyphCache::findPath(const SkGlyph& glyph) {
             const_cast<SkGlyph&>(glyph).fPath = SkNEW(SkPath);
             fScalerContext->getPath(glyph, glyph.fPath);
             fMemoryUsed += sizeof(SkPath) +
-                    glyph.fPath->getPoints(NULL, 0x7FFFFFFF) * sizeof(SkPoint);
+                    glyph.fPath->countPoints() * sizeof(SkPoint);
         }
     }
     return glyph.fPath;
@@ -355,25 +395,6 @@ void SkGlyphCache::setAuxProc(void (*proc)(void*), void* data) {
     fAuxProcList = rec;
 }
 
-void SkGlyphCache::removeAuxProc(void (*proc)(void*)) {
-    AuxProcRec* rec = fAuxProcList;
-    AuxProcRec* prev = NULL;
-    while (rec) {
-        AuxProcRec* next = rec->fNext;
-        if (rec->fProc == proc) {
-            if (prev) {
-                prev->fNext = next;
-            } else {
-                fAuxProcList = next;
-            }
-            SkDELETE(rec);
-            return;
-        }
-        prev = rec;
-        rec = next;
-    }
-}
-
 void SkGlyphCache::invokeAndRemoveAuxProcs() {
     AuxProcRec* rec = fAuxProcList;
     while (rec) {
@@ -387,55 +408,38 @@ void SkGlyphCache::invokeAndRemoveAuxProcs() {
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 
-#ifdef USE_CACHE_HASH
-    #define HASH_BITCOUNT   6
-    #define HASH_COUNT      (1 << HASH_BITCOUNT)
-    #define HASH_MASK       (HASH_COUNT - 1)
-
-    static unsigned desc_to_hashindex(const SkDescriptor* desc)
-    {
-        SkASSERT(HASH_MASK < 256);  // since our munging reduces to 8 bits
-
-        uint32_t n = *(const uint32_t*)desc;    //desc->getChecksum();
-        SkASSERT(n == desc->getChecksum());
-
-        // don't trust that the low bits of checksum vary enough, so...
-        n ^= (n >> 24) ^ (n >> 16) ^ (n >> 8) ^ (n >> 30);
-
-        return n & HASH_MASK;
-    }
-#endif
-
 #include "SkThread.h"
 
-class SkGlyphCache_Globals {
-public:
-    SkGlyphCache_Globals() {
-        fHead = NULL;
-        fTotalMemoryUsed = 0;
-#ifdef USE_CACHE_HASH
-        sk_bzero(fHash, sizeof(fHash));
-#endif
+size_t SkGlyphCache_Globals::setCacheSizeLimit(size_t newLimit) {
+    static const size_t minLimit = 256 * 1024;
+    if (newLimit < minLimit) {
+        newLimit = minLimit;
     }
 
-    SkMutex         fMutex;
-    SkGlyphCache*   fHead;
-    size_t          fTotalMemoryUsed;
-#ifdef USE_CACHE_HASH
-    SkGlyphCache*   fHash[HASH_COUNT];
-#endif
+    SkAutoMutexAcquire    ac(fMutex);
 
-#ifdef SK_DEBUG
-    void validate() const;
-#else
-    void validate() const {}
-#endif
-};
+    size_t prevLimit = fCacheSizeLimit;
+    fCacheSizeLimit = newLimit;
+    this->internalPurge();
+    return prevLimit;
+}
 
-static SkGlyphCache_Globals& getGlobals() {
-    // we leak this, so we don't incur any shutdown cost of the destructor
-    static SkGlyphCache_Globals* gGlobals = new SkGlyphCache_Globals;
-    return *gGlobals;
+int SkGlyphCache_Globals::setCacheCountLimit(int newCount) {
+    if (newCount < 0) {
+        newCount = 0;
+    }
+
+    SkAutoMutexAcquire    ac(fMutex);
+
+    int prevCount = fCacheCountLimit;
+    fCacheCountLimit = newCount;
+    this->internalPurge();
+    return prevCount;
+}
+
+void SkGlyphCache_Globals::purgeAll() {
+    SkAutoMutexAcquire    ac(fMutex);
+    this->internalPurge(fTotalMemoryUsed);
 }
 
 void SkGlyphCache::VisitAllCaches(bool (*proc)(SkGlyphCache*, void*),
@@ -446,7 +450,7 @@ void SkGlyphCache::VisitAllCaches(bool (*proc)(SkGlyphCache*, void*),
 
     globals.validate();
 
-    for (cache = globals.fHead; cache != NULL; cache = cache->fNext) {
+    for (cache = globals.internalGetHead(); cache != NULL; cache = cache->fNext) {
         if (proc(cache, context)) {
             break;
         }
@@ -461,9 +465,13 @@ void SkGlyphCache::VisitAllCaches(bool (*proc)(SkGlyphCache*, void*),
     - try to acquire the mutext again
     - call a fontscaler (which might call into the cache)
 */
-SkGlyphCache* SkGlyphCache::VisitCache(const SkDescriptor* desc,
+SkGlyphCache* SkGlyphCache::VisitCache(SkTypeface* typeface,
+                              const SkDescriptor* desc,
                               bool (*proc)(const SkGlyphCache*, void*),
                               void* context) {
+    if (!typeface) {
+        typeface = SkTypeface::GetDefaultTypeface();
+    }
     SkASSERT(desc);
 
     SkGlyphCache_Globals& globals = getGlobals();
@@ -473,19 +481,9 @@ SkGlyphCache* SkGlyphCache::VisitCache(const SkDescriptor* desc,
 
     globals.validate();
 
-#ifdef USE_CACHE_HASH
-    SkGlyphCache** hash = globals.fHash;
-    unsigned index = desc_to_hashindex(desc);
-    cache = hash[index];
-    if (cache && *cache->fDesc == *desc) {
-        cache->detach(&globals.fHead);
-        goto FOUND_IT;
-    }
-#endif
-
-    for (cache = globals.fHead; cache != NULL; cache = cache->fNext) {
+    for (cache = globals.internalGetHead(); cache != NULL; cache = cache->fNext) {
         if (cache->fDesc->equals(*desc)) {
-            cache->detach(&globals.fHead);
+            globals.internalDetachCache(cache);
             goto FOUND_IT;
         }
     }
@@ -496,28 +494,30 @@ SkGlyphCache* SkGlyphCache::VisitCache(const SkDescriptor* desc,
     ac.release();           // release the mutex now
     insideMutex = false;    // can't use globals anymore
 
-    cache = SkNEW_ARGS(SkGlyphCache, (desc));
+    // Check if we can create a scaler-context before creating the glyphcache.
+    // If not, we may have exhausted OS/font resources, so try purging the
+    // cache once and try again.
+    {
+        // pass true the first time, to notice if the scalercontext failed,
+        // so we can try the purge.
+        SkScalerContext* ctx = typeface->createScalerContext(desc, true);
+        if (!ctx) {
+            getSharedGlobals().purgeAll();
+            ctx = typeface->createScalerContext(desc, false);
+            SkASSERT(ctx);
+        }
+        cache = SkNEW_ARGS(SkGlyphCache, (typeface, desc, ctx));
+    }
 
 FOUND_IT:
 
     AutoValidate av(cache);
 
-    if (proc(cache, context)) {   // stay detached
+    if (!proc(cache, context)) {   // need to reattach
         if (insideMutex) {
-            SkASSERT(globals.fTotalMemoryUsed >= cache->fMemoryUsed);
-            globals.fTotalMemoryUsed -= cache->fMemoryUsed;
-#ifdef USE_CACHE_HASH
-            hash[index] = NULL;
-#endif
-        }
-    } else {                        // reattach
-        if (insideMutex) {
-            cache->attachToHead(&globals.fHead);
-#ifdef USE_CACHE_HASH
-            hash[index] = cache;
-#endif
+            globals.internalAttachCacheToHead(cache);
         } else {
-            AttachCache(cache);
+            globals.attachCacheToHead(cache);
         }
         cache = NULL;
     }
@@ -528,55 +528,23 @@ void SkGlyphCache::AttachCache(SkGlyphCache* cache) {
     SkASSERT(cache);
     SkASSERT(cache->fNext == NULL);
 
-    SkGlyphCache_Globals& globals = getGlobals();
-    SkAutoMutexAcquire    ac(globals.fMutex);
-
-    globals.validate();
-    cache->validate();
-
-    // if we have a fixed budget for our cache, do a purge here
-    {
-        size_t allocated = globals.fTotalMemoryUsed + cache->fMemoryUsed;
-        size_t budgeted = SkGraphics::GetFontCacheLimit();
-        if (allocated > budgeted) {
-            (void)InternalFreeCache(&globals, allocated - budgeted);
-        }
-    }
-
-    cache->attachToHead(&globals.fHead);
-    globals.fTotalMemoryUsed += cache->fMemoryUsed;
-
-#ifdef USE_CACHE_HASH
-    unsigned index = desc_to_hashindex(cache->fDesc);
-    SkASSERT(globals.fHash[index] != cache);
-    globals.fHash[index] = cache;
-#endif
-
-    globals.validate();
-}
-
-size_t SkGlyphCache::GetCacheUsed() {
-    SkGlyphCache_Globals& globals = getGlobals();
-    SkAutoMutexAcquire  ac(globals.fMutex);
-
-    return SkGlyphCache::ComputeMemoryUsed(globals.fHead);
-}
-
-bool SkGlyphCache::SetCacheUsed(size_t bytesUsed) {
-    size_t curr = SkGlyphCache::GetCacheUsed();
-
-    if (curr > bytesUsed) {
-        SkGlyphCache_Globals& globals = getGlobals();
-        SkAutoMutexAcquire  ac(globals.fMutex);
-
-        return InternalFreeCache(&globals, curr - bytesUsed) > 0;
-    }
-    return false;
+    getGlobals().attachCacheToHead(cache);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-SkGlyphCache* SkGlyphCache::FindTail(SkGlyphCache* cache) {
+void SkGlyphCache_Globals::attachCacheToHead(SkGlyphCache* cache) {
+    SkAutoMutexAcquire    ac(fMutex);
+
+    this->validate();
+    cache->validate();
+
+    this->internalAttachCacheToHead(cache);
+    this->internalPurge();
+}
+
+SkGlyphCache* SkGlyphCache_Globals::internalGetTail() const {
+    SkGlyphCache* cache = fHead;
     if (cache) {
         while (cache->fNext) {
             cache = cache->fNext;
@@ -585,83 +553,166 @@ SkGlyphCache* SkGlyphCache::FindTail(SkGlyphCache* cache) {
     return cache;
 }
 
-size_t SkGlyphCache::ComputeMemoryUsed(const SkGlyphCache* head) {
-    size_t size = 0;
+size_t SkGlyphCache_Globals::internalPurge(size_t minBytesNeeded) {
+    this->validate();
 
-    while (head != NULL) {
-        size += head->fMemoryUsed;
-        head = head->fNext;
+    size_t bytesNeeded = 0;
+    if (fTotalMemoryUsed > fCacheSizeLimit) {
+        bytesNeeded = fTotalMemoryUsed - fCacheSizeLimit;
     }
-    return size;
-}
-
-#ifdef SK_DEBUG
-void SkGlyphCache_Globals::validate() const {
-    size_t computed = SkGlyphCache::ComputeMemoryUsed(fHead);
-    if (fTotalMemoryUsed != computed) {
-        printf("total %d, computed %d\n", (int)fTotalMemoryUsed, (int)computed);
+    bytesNeeded = SkMax32(bytesNeeded, minBytesNeeded);
+    if (bytesNeeded) {
+        // no small purges!
+        bytesNeeded = SkMax32(bytesNeeded, fTotalMemoryUsed >> 2);
     }
-    SkASSERT(fTotalMemoryUsed == computed);
-}
-#endif
 
-size_t SkGlyphCache::InternalFreeCache(SkGlyphCache_Globals* globals,
-                                       size_t bytesNeeded) {
-    globals->validate();
+    int countNeeded = 0;
+    if (fCacheCount > fCacheCountLimit) {
+        countNeeded = fCacheCount - fCacheCountLimit;
+        // no small purges!
+        countNeeded = SkMax32(countNeeded, fCacheCount >> 2);
+    }
+
+    // early exit
+    if (!countNeeded && !bytesNeeded) {
+        return 0;
+    }
 
     size_t  bytesFreed = 0;
-    int     count = 0;
+    int     countFreed = 0;
 
-    // don't do any "small" purges
-    size_t minToPurge = globals->fTotalMemoryUsed >> 2;
-    if (bytesNeeded < minToPurge)
-        bytesNeeded = minToPurge;
-
-    SkGlyphCache* cache = FindTail(globals->fHead);
-    while (cache != NULL && bytesFreed < bytesNeeded) {
+    // we start at the tail and proceed backwards, as the linklist is in LRU
+    // order, with unimportant entries at the tail.
+    SkGlyphCache* cache = this->internalGetTail();
+    while (cache != NULL &&
+           (bytesFreed < bytesNeeded || countFreed < countNeeded)) {
         SkGlyphCache* prev = cache->fPrev;
         bytesFreed += cache->fMemoryUsed;
+        countFreed += 1;
 
-#ifdef USE_CACHE_HASH
-        unsigned index = desc_to_hashindex(cache->fDesc);
-        if (cache == globals->fHash[index]) {
-            globals->fHash[index] = NULL;
-        }
-#endif
-
-        cache->detach(&globals->fHead);
+        this->internalDetachCache(cache);
         SkDELETE(cache);
         cache = prev;
-        count += 1;
     }
 
-    SkASSERT(bytesFreed <= globals->fTotalMemoryUsed);
-    globals->fTotalMemoryUsed -= bytesFreed;
-    globals->validate();
+    this->validate();
 
 #ifdef SPEW_PURGE_STATUS
-    if (count && !gSkSuppressFontCachePurgeSpew) {
+    if (countFreed && !gSkSuppressFontCachePurgeSpew) {
         SkDebugf("purging %dK from font cache [%d entries]\n",
-                 (int)(bytesFreed >> 10), count);
+                 (int)(bytesFreed >> 10), countFreed);
     }
 #endif
 
     return bytesFreed;
 }
 
+void SkGlyphCache_Globals::internalAttachCacheToHead(SkGlyphCache* cache) {
+    SkASSERT(NULL == cache->fPrev && NULL == cache->fNext);
+    if (fHead) {
+        fHead->fPrev = cache;
+        cache->fNext = fHead;
+    }
+    fHead = cache;
+
+    fCacheCount += 1;
+    fTotalMemoryUsed += cache->fMemoryUsed;
+}
+
+void SkGlyphCache_Globals::internalDetachCache(SkGlyphCache* cache) {
+    SkASSERT(fCacheCount > 0);
+    fCacheCount -= 1;
+    fTotalMemoryUsed -= cache->fMemoryUsed;
+
+    if (cache->fPrev) {
+        cache->fPrev->fNext = cache->fNext;
+    } else {
+        fHead = cache->fNext;
+    }
+    if (cache->fNext) {
+        cache->fNext->fPrev = cache->fPrev;
+    }
+    cache->fPrev = cache->fNext = NULL;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
+
 #ifdef SK_DEBUG
 
 void SkGlyphCache::validate() const {
+#ifdef SK_DEBUG_GLYPH_CACHE
     int count = fGlyphArray.count();
     for (int i = 0; i < count; i++) {
         const SkGlyph* glyph = fGlyphArray[i];
         SkASSERT(glyph);
         SkASSERT(fGlyphAlloc.contains(glyph));
         if (glyph->fImage) {
-            SkASSERT(fImageAlloc.contains(glyph->fImage));
+            SkASSERT(fGlyphAlloc.contains(glyph->fImage));
         }
     }
+#endif
+}
+
+void SkGlyphCache_Globals::validate() const {
+    size_t computedBytes = 0;
+    int computedCount = 0;
+
+    const SkGlyphCache* head = fHead;
+    while (head != NULL) {
+        computedBytes += head->fMemoryUsed;
+        computedCount += 1;
+        head = head->fNext;
+    }
+
+    SkASSERT(fTotalMemoryUsed == computedBytes);
+    SkASSERT(fCacheCount == computedCount);
 }
 
 #endif
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+#include "SkTypefaceCache.h"
+
+size_t SkGraphics::GetFontCacheLimit() {
+    return getSharedGlobals().getCacheSizeLimit();
+}
+
+size_t SkGraphics::SetFontCacheLimit(size_t bytes) {
+    return getSharedGlobals().setCacheSizeLimit(bytes);
+}
+
+size_t SkGraphics::GetFontCacheUsed() {
+    return getSharedGlobals().getTotalMemoryUsed();
+}
+
+int SkGraphics::GetFontCacheCountLimit() {
+    return getSharedGlobals().getCacheCountLimit();
+}
+
+int SkGraphics::SetFontCacheCountLimit(int count) {
+    return getSharedGlobals().setCacheCountLimit(count);
+}
+
+int SkGraphics::GetFontCacheCountUsed() {
+    return getSharedGlobals().getCacheCountUsed();
+}
+
+void SkGraphics::PurgeFontCache() {
+    getSharedGlobals().purgeAll();
+    SkTypefaceCache::PurgeAll();
+}
+
+size_t SkGraphics::GetTLSFontCacheLimit() {
+    const SkGlyphCache_Globals* tls = SkGlyphCache_Globals::FindTLS();
+    return tls ? tls->getCacheSizeLimit() : 0;
+}
+
+void SkGraphics::SetTLSFontCacheLimit(size_t bytes) {
+    if (0 == bytes) {
+        SkGlyphCache_Globals::DeleteTLS();
+    } else {
+        SkGlyphCache_Globals::GetTLS().setCacheSizeLimit(bytes);
+    }
+}

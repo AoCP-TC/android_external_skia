@@ -1,15 +1,16 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
+
 #include "Test.h"
+#include "TestClassDef.h"
 #include "SkColor.h"
 #include "SkXfermode.h"
 
-SkPMColor bogusXfermodeProc(SkPMColor src, SkPMColor dst) {
+static SkPMColor bogusXfermodeProc(SkPMColor src, SkPMColor dst) {
     return 42;
 }
 
@@ -23,7 +24,7 @@ static void test_asMode(skiatest::Reporter* reporter) {
         REPORTER_ASSERT(reporter, reportedMode != mode);
 
         // test IsMode
-        REPORTER_ASSERT(reporter, SkXfermode::IsMode(xfer, &reportedMode));
+        REPORTER_ASSERT(reporter, SkXfermode::AsMode(xfer, &reportedMode));
         REPORTER_ASSERT(reporter, reportedMode == mode);
 
         // repeat that test, but with asMode instead
@@ -33,16 +34,16 @@ static void test_asMode(skiatest::Reporter* reporter) {
             REPORTER_ASSERT(reporter, reportedMode == mode);
             xfer->unref();
         } else {
-            REPORTER_ASSERT(reporter, SkXfermode::kSrcOver_Mode == mode); 
+            REPORTER_ASSERT(reporter, SkXfermode::kSrcOver_Mode == mode);
         }
     }
 
     SkXfermode* bogusXfer = new SkProcXfermode(bogusXfermodeProc);
-    SkXfermode::Mode reportedMode = (SkXfermode::Mode) -1;
+    SkXfermode::Mode reportedMode = ILLEGAL_MODE;
     REPORTER_ASSERT(reporter, !bogusXfer->asMode(&reportedMode));
-    REPORTER_ASSERT(reporter, reportedMode == -1);
-    REPORTER_ASSERT(reporter, !SkXfermode::IsMode(bogusXfer, &reportedMode));
-    REPORTER_ASSERT(reporter, reportedMode == -1);
+    REPORTER_ASSERT(reporter, reportedMode == ILLEGAL_MODE);
+    REPORTER_ASSERT(reporter, !SkXfermode::AsMode(bogusXfer, &reportedMode));
+    REPORTER_ASSERT(reporter, reportedMode == ILLEGAL_MODE);
     bogusXfer->unref();
 }
 
@@ -52,7 +53,7 @@ static void test_IsMode(skiatest::Reporter* reporter) {
 
     for (int i = 0; i <= SkXfermode::kLastMode; ++i) {
         SkXfermode::Mode mode = (SkXfermode::Mode)i;
-        
+
         SkXfermode* xfer = SkXfermode::Create(mode);
         REPORTER_ASSERT(reporter, SkXfermode::IsMode(xfer, mode));
         SkSafeUnref(xfer);
@@ -63,10 +64,7 @@ static void test_IsMode(skiatest::Reporter* reporter) {
     }
 }
 
-static void test_xfermodes(skiatest::Reporter* reporter) {
+DEF_TEST(Xfermode, reporter) {
     test_asMode(reporter);
     test_IsMode(reporter);
 }
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("Xfermode", XfermodeTestClass, test_xfermodes)

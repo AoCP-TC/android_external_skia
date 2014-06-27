@@ -16,10 +16,24 @@
 #include "SkTemplates.h"
 #include "SkWriter32.h"
 
+class SkPictureStateTree;
+class SkBBoxHierarchy;
+
+// These macros help with packing and unpacking a single byte value and
+// a 3 byte value into/out of a uint32_t
+#define MASK_24 0x00FFFFFF
+#define UNPACK_8_24(combined, small, large)             \
+    small = (combined >> 24) & 0xFF;                    \
+    large = combined & MASK_24;
+#define PACK_8_24(small, large) ((small << 24) | large)
+
+
 class SkPictureRecord : public SkCanvas {
 public:
-    SkPictureRecord(uint32_t recordFlags);
+    SkPictureRecord(uint32_t recordFlags, SkBaseDevice*);
     virtual ~SkPictureRecord();
+
+    virtual SkBaseDevice* setDevice(SkBaseDevice* device) SK_OVERRIDE;
 
     virtual int save(SaveFlags) SK_OVERRIDE;
     virtual int saveLayer(const SkRect* bounds, const SkPaint*, SaveFlags) SK_OVERRIDE;
@@ -31,18 +45,22 @@ public:
     virtual bool concat(const SkMatrix& matrix) SK_OVERRIDE;
     virtual void setMatrix(const SkMatrix& matrix) SK_OVERRIDE;
     virtual bool clipRect(const SkRect&, SkRegion::Op, bool) SK_OVERRIDE;
+    virtual bool clipRRect(const SkRRect&, SkRegion::Op, bool) SK_OVERRIDE;
     virtual bool clipPath(const SkPath&, SkRegion::Op, bool) SK_OVERRIDE;
     virtual bool clipRegion(const SkRegion& region, SkRegion::Op op) SK_OVERRIDE;
     virtual void clear(SkColor) SK_OVERRIDE;
     virtual void drawPaint(const SkPaint& paint) SK_OVERRIDE;
     virtual void drawPoints(PointMode, size_t count, const SkPoint pts[],
                             const SkPaint&) SK_OVERRIDE;
-    virtual void drawRect(const SkRect& rect, const SkPaint&) SK_OVERRIDE;
+    virtual void drawOval(const SkRect&, const SkPaint&) SK_OVERRIDE;
+    virtual void drawRect(const SkRect&, const SkPaint&) SK_OVERRIDE;
+    virtual void drawRRect(const SkRRect&, const SkPaint&) SK_OVERRIDE;
     virtual void drawPath(const SkPath& path, const SkPaint&) SK_OVERRIDE;
     virtual void drawBitmap(const SkBitmap&, SkScalar left, SkScalar top,
                             const SkPaint*) SK_OVERRIDE;
-    virtual void drawBitmapRect(const SkBitmap&, const SkIRect* src,
-                                const SkRect& dst, const SkPaint*) SK_OVERRIDE;
+    virtual void drawBitmapRectToRect(const SkBitmap&, const SkRect* src,
+                                      const SkRect& dst, const SkPaint* paint,
+                                      DrawBitmapRectFlags flags) SK_OVERRIDE;
     virtual void drawBitmapMatrix(const SkBitmap&, const SkMatrix&,
                                   const SkPaint*) SK_OVERRIDE;
     virtual void drawBitmapNine(const SkBitmap& bitmap, const SkIRect& center,
@@ -65,45 +83,76 @@ public:
                           const uint16_t indices[], int indexCount,
                               const SkPaint&) SK_OVERRIDE;
     virtual void drawData(const void*, size_t) SK_OVERRIDE;
+    virtual void beginCommentGroup(const char* description) SK_OVERRIDE;
+    virtual void addComment(const char* kywd, const char* value) SK_OVERRIDE;
+    virtual void endCommentGroup() SK_OVERRIDE;
     virtual bool isDrawingToLayer() const SK_OVERRIDE;
 
-    void addFontMetricsTopBottom(const SkPaint& paint, SkScalar minY, SkScalar maxY);
+    void addFontMetricsTopBottom(const SkPaint& paint, const SkFlatData&,
+                                 SkScalar minY, SkScalar maxY);
 
-    const SkTDArray<const SkFlatBitmap* >& getBitmaps() const {
-        return fBitmaps;
-    }
-    const SkTDArray<const SkFlatMatrix* >& getMatrices() const {
-        return fMatrices;
-    }
-    const SkTDArray<const SkFlatPaint* >& getPaints() const {
-        return fPaints;
-    }
     const SkTDArray<SkPicture* >& getPictureRefs() const {
         return fPictureRefs;
     }
-    const SkTDArray<const SkFlatRegion* >& getRegions() const {
-        return fRegions;
-    }
 
-    void reset();
+    void setFlags(uint32_t recordFlags) {
+        fRecordFlags = recordFlags;
+    }
 
     const SkWriter32& writeStream() const {
         return fWriter;
     }
 
+    void beginRecording();
+    void endRecording();
+
 private:
-    SkTDArray<uint32_t> fRestoreOffsetStack;
+    void handleOptimization(int opt);
+    void recordRestoreOffsetPlaceholder(SkRegion::Op);
+    void fillRestoreOffsetPlaceholdersForCurrentStackLevel(
+        uint32_t restoreOffset);
+
+    SkTDArray<int32_t> fRestoreOffsetStack;
     int fFirstSavedLayerIndex;
     enum {
         kNoSavedLayerIndex = -1
     };
 
-    void addDraw(DrawType drawType) {
-#ifdef SK_DEBUG_TRACE
+    /*
+     * Write the 'drawType' operation and chunk size to the skp. 'size'
+     * can potentially be increased if the chunk size needs its own storage
+     * location (i.e., it overflows 24 bits).
+     * Returns the start offset of the chunk. This is the location at which
+     * the opcode & size are stored.
+     * TODO: since we are handing the size into here we could call reserve
+     * and then return a pointer to the memory storage. This could decrease
+     * allocation overhead but could lead to more wasted space (the tail
+     * end of blocks could go unused). Possibly add a second addDraw that
+     * operates in this manner.
+     */
+    size_t addDraw(DrawType drawType, uint32_t* size) {
+        size_t offset = fWriter.bytesWritten();
+
+        this->predrawNotify();
+
+    #ifdef SK_DEBUG_TRACE
         SkDebugf("add %s\n", DrawTypeToString(drawType));
-#endif
-        fWriter.writeInt(drawType);
+    #endif
+
+        SkASSERT(0 != *size);
+        SkASSERT(((uint8_t) drawType) == drawType);
+
+        if (0 != (*size & ~MASK_24) || *size == MASK_24) {
+            fWriter.writeInt(PACK_8_24(drawType, MASK_24));
+            *size += 1;
+            fWriter.writeInt(*size);
+        } else {
+            fWriter.writeInt(PACK_8_24(drawType, *size));
+        }
+
+        return offset;
     }
+
     void addInt(int value) {
         fWriter.writeInt(value);
     }
@@ -114,8 +163,9 @@ private:
     void addBitmap(const SkBitmap& bitmap);
     void addMatrix(const SkMatrix& matrix);
     void addMatrixPtr(const SkMatrix* matrix);
-    void addPaint(const SkPaint& paint);
-    void addPaintPtr(const SkPaint* paint);
+    const SkFlatData* addPaint(const SkPaint& paint) { return this->addPaintPtr(&paint); }
+    const SkFlatData* addPaintPtr(const SkPaint* paint);
+    void addFlatPaint(const SkFlatData* flatPaint);
     void addPath(const SkPath& path);
     void addPicture(SkPicture& picture);
     void addPoint(const SkPoint& point);
@@ -124,15 +174,11 @@ private:
     void addRectPtr(const SkRect* rect);
     void addIRect(const SkIRect& rect);
     void addIRectPtr(const SkIRect* rect);
+    void addRRect(const SkRRect&);
     void addRegion(const SkRegion& region);
     void addText(const void* text, size_t byteLength);
 
-    int find(SkTDArray<const SkFlatBitmap* >& bitmaps,
-                   const SkBitmap& bitmap);
-    int find(SkTDArray<const SkFlatMatrix* >& matrices,
-                   const SkMatrix* matrix);
-    int find(SkTDArray<const SkFlatPaint* >& paints, const SkPaint* paint);
-    int find(SkTDArray<const SkFlatRegion* >& regions, const SkRegion& region);
+    int find(const SkBitmap& bitmap);
 
 #ifdef SK_DEBUG_DUMP
 public:
@@ -156,7 +202,7 @@ public:
 
 #ifdef SK_DEBUG_VALIDATE
 public:
-    void validate() const;
+    void validate(size_t initialOffset, uint32_t size) const;
 private:
     void validateBitmaps() const;
     void validateMatrices() const;
@@ -165,32 +211,56 @@ private:
     void validateRegions() const;
 #else
 public:
-    void validate() const {}
+    void validate(size_t initialOffset, uint32_t size) const {
+        SkASSERT(fWriter.bytesWritten() == initialOffset + size);
+    }
 #endif
 
+protected:
+    // Return fontmetrics.fTop,fBottom in topbot[0,1], after they have been
+    // tweaked by paint.computeFastBounds().
+    static void ComputeFontMetricsTopBottom(const SkPaint& paint, SkScalar topbot[2]);
+
+    // Make sure that flat has fTopBot written.
+    static void WriteTopBot(const SkPaint& paint, const SkFlatData& flat) {
+        if (!flat.isTopBotWritten()) {
+            ComputeFontMetricsTopBottom(paint, flat.writableTopBot());
+            SkASSERT(flat.isTopBotWritten());
+        }
+    }
+    // Will return a cached version when possible.
+    const SkFlatData* getFlatPaintData(const SkPaint& paint);
+    /**
+     * SkBBoxRecord::drawPosTextH gets a flat paint and uses it,
+     * then it calls this, using the extra parameter, to avoid duplication.
+     */
+    void drawPosTextHImpl(const void* text, size_t byteLength,
+                          const SkScalar xpos[], SkScalar constY,
+                          const SkPaint& paint, const SkFlatData* flatPaintData);
+
+    // These are set to NULL in our constructor, but may be changed by
+    // subclasses, in which case they will be SkSafeUnref'd in our destructor.
+    SkBBoxHierarchy* fBoundingHierarchy;
+    SkPictureStateTree* fStateTree;
+
+    // Allocated in the constructor and managed by this class.
+    SkBitmapHeap* fBitmapHeap;
+
 private:
-    SkChunkAlloc fHeap;
-    int fBitmapIndex;
-    SkTDArray<const SkFlatBitmap* > fBitmaps;
-    int fMatrixIndex;
-    SkTDArray<const SkFlatMatrix* > fMatrices;
-    int fPaintIndex;
-    SkTDArray<const SkFlatPaint* > fPaints;
-    int fRegionIndex;
-    SkTDArray<const SkFlatRegion* > fRegions;
+    SkChunkFlatController fFlattenableHeap;
+
+    SkMatrixDictionary fMatrices;
+    SkPaintDictionary fPaints;
+    SkRegionDictionary fRegions;
+
     SkPathHeap* fPathHeap;  // reference counted
     SkWriter32 fWriter;
 
     // we ref each item in these arrays
     SkTDArray<SkPicture*> fPictureRefs;
 
-    SkRefCntSet fRCSet;
-    SkRefCntSet fTFSet;
-
     uint32_t fRecordFlags;
-
-    // helper function to handle save/restore culling offsets
-    void recordOffsetForRestore(SkRegion::Op op);
+    int fInitialSaveCount;
 
     friend class SkPicturePlayback;
     friend class SkPictureTester; // for unit testing

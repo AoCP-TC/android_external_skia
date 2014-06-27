@@ -26,12 +26,10 @@ class VertBench : public SkBenchmark {
         COL = 20,
         PTS = (ROW + 1) * (COL + 1),
         IDX = ROW * COL * 6,
-        N = SkBENCHLOOP(10)
     };
 
     SkPoint fPts[PTS];
     SkColor fColors[PTS];
-    SkPoint fTex[PTS];
     uint16_t fIdx[IDX];
 
     static void load_2_tris(uint16_t idx[], int x, int y, int rb) {
@@ -39,9 +37,9 @@ class VertBench : public SkBenchmark {
         idx[0] = n; idx[1] = n + 1; idx[2] = rb + n + 1;
         idx[3] = n; idx[4] = rb + n + 1; idx[5] = n + rb;
     }
-    
+
 public:
-    VertBench(void* param) : INHERITED(param) {
+    VertBench() {
         const SkScalar dx = SkIntToScalar(W) / COL;
         const SkScalar dy = SkIntToScalar(H) / COL;
 
@@ -55,7 +53,7 @@ public:
                 pts->set(xx, yy);
                 pts += 1;
                 xx += dx;
-                
+
                 if (x < COL && y < ROW) {
                     load_2_tris(idx, x, y, COL + 1);
                     for (int i = 0; i < 6; i++) {
@@ -79,11 +77,11 @@ public:
 
 protected:
     virtual const char* onGetName() { return fName.c_str(); }
-    virtual void onDraw(SkCanvas* canvas) {
+    virtual void onDraw(const int loops, SkCanvas* canvas) {
         SkPaint paint;
         this->setupPaint(&paint);
 
-        for (int i = 0; i < N; i++) {
+        for (int i = 0; i < loops; i++) {
             canvas->drawVertices(SkCanvas::kTriangles_VertexMode, PTS,
                                  fPts, NULL, fColors, NULL, fIdx, IDX, paint);
         }
@@ -94,6 +92,4 @@ private:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static SkBenchmark* Fact(void* p) { return SkNEW_ARGS(VertBench, (p)); }
-
-static BenchRegistry gReg(Fact);
+DEF_BENCH( return SkNEW_ARGS(VertBench, ()); )

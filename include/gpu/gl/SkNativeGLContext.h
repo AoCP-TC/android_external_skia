@@ -8,29 +8,29 @@
 #ifndef SkNativeGLContext_DEFINED
 #define SkNativeGLContext_DEFINED
 
-#include "SkGLContext.h"
+#include "SkGLContextHelper.h"
 
 #if defined(SK_BUILD_FOR_MAC)
-    #include <AGL/agl.h>
-
-#elif defined(SK_BUILD_FOR_ANDROID)
+    #include <OpenGL/OpenGL.h>
+#elif defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_NACL)
     #include <GLES2/gl2.h>
     #include <EGL/egl.h>
 #elif defined(SK_BUILD_FOR_UNIX)
     #include <X11/Xlib.h>
     #include <GL/glx.h>
 #elif defined(SK_BUILD_FOR_WIN32)
-    #include <Windows.h>
+    #include <windows.h>
     #include <GL/GL.h>
 #endif
 
-class SkNativeGLContext : public SkGLContext {
+class SkNativeGLContext : public SkGLContextHelper {
 public:
     SkNativeGLContext();
 
     virtual ~SkNativeGLContext();
 
     virtual void makeCurrent() const SK_OVERRIDE;
+    virtual void swapBuffers() const SK_OVERRIDE;
 
     class AutoContextRestore {
     public:
@@ -39,7 +39,11 @@ public:
 
     private:
     #if defined(SK_BUILD_FOR_MAC)
-        AGLContext fOldAGLContext;
+        CGLContextObj fOldCGLContext;
+    #elif defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_NACL)
+        EGLContext fOldEGLContext;
+        EGLDisplay fOldDisplay;
+        EGLSurface fOldSurface;
     #elif defined(SK_BUILD_FOR_UNIX)
         GLXContext fOldGLXContext;
         Display* fOldDisplay;
@@ -47,10 +51,9 @@ public:
     #elif defined(SK_BUILD_FOR_WIN32)
         HDC fOldHDC;
         HGLRC fOldHGLRC;
-    #elif defined(SK_BUILD_FOR_ANDROID)
-        EGLContext fOldEGLContext;
-        EGLDisplay fOldDisplay;
-        EGLSurface fOldSurface;
+
+    #elif defined(SK_BUILD_FOR_IOS)
+        void* fEAGLContext;
     #endif
     };
 
@@ -60,7 +63,11 @@ protected:
 
 private:
 #if defined(SK_BUILD_FOR_MAC)
-    AGLContext fContext;
+    CGLContextObj fContext;
+#elif defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_NACL)
+    EGLContext fContext;
+    EGLDisplay fDisplay;
+    EGLSurface fSurface;
 #elif defined(SK_BUILD_FOR_UNIX)
     GLXContext fContext;
     Display* fDisplay;
@@ -71,10 +78,8 @@ private:
     HDC fDeviceContext;
     HGLRC fGlRenderContext;
     static ATOM gWC;
-#elif defined(SK_BUILD_FOR_ANDROID)
-    EGLContext fContext;
-    EGLDisplay fDisplay;
-    EGLSurface fSurface;
+#elif defined(SK_BUILD_FOR_IOS)
+    void* fEAGLContext;
 #endif
 };
 

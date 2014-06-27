@@ -6,6 +6,7 @@
  */
 
 #include "Test.h"
+#include "TestClassDef.h"
 #include "SkPath.h"
 #include "SkCanvas.h"
 
@@ -28,7 +29,7 @@ static void drawAndTest(skiatest::Reporter* reporter, const SkPath& path,
     // explicitly specify a trim rowbytes, so we have no padding on each row
     bm.setConfig(SkBitmap::kARGB_8888_Config, DIMENSION, DIMENSION, DIMENSION*4);
     bm.allocPixels();
-    bm.eraseColor(0);
+    bm.eraseColor(SK_ColorTRANSPARENT);
 
     SkCanvas canvas(bm);
     SkPaint p(paint);
@@ -39,7 +40,7 @@ static void drawAndTest(skiatest::Reporter* reporter, const SkPath& path,
     size_t count = DIMENSION * DIMENSION;
     const SkPMColor* ptr = bm.getAddr32(0, 0);
 
-    SkPMColor andValue = ~0;
+    SkPMColor andValue = ~0U;
     SkPMColor orValue = 0;
     for (size_t i = 0; i < count; ++i) {
         SkPMColor c = ptr[i];
@@ -59,7 +60,7 @@ static void drawAndTest(skiatest::Reporter* reporter, const SkPath& path,
         }
         appendStr(&str, paint);
         appendStr(&str, path);
-        reporter->report(str.c_str(), skiatest::Reporter::kFailed);
+        reporter->reportFailed(str);
 
 // uncomment this if you want to step in to see the failure
 //        canvas.drawPath(path, p);
@@ -104,7 +105,7 @@ static void iter_paint(skiatest::Reporter* reporter, const SkPath& path, bool sh
 #define CX  (SkIntToScalar(DIMENSION) / 2)
 #define CY  (SkIntToScalar(DIMENSION) / 2)
 
-static void make_empty(SkPath* path) {}
+static void make_empty(SkPath*) {}
 static void make_M(SkPath* path) { path->moveTo(CX, CY); }
 static void make_MM(SkPath* path) { path->moveTo(CX, CY); path->moveTo(CX, CY); }
 static void make_MZM(SkPath* path) { path->moveTo(CX, CY); path->close(); path->moveTo(CX, CY); }
@@ -148,9 +149,6 @@ static void test_emptydrawing(skiatest::Reporter* reporter) {
     }
 }
 
-static void TestEmptyPath(skiatest::Reporter* reporter) {
+DEF_TEST(EmptyPath, reporter) {
     test_emptydrawing(reporter);
 }
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("EmptyPath", TestEmptyPathClass, TestEmptyPath)

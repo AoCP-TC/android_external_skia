@@ -1,21 +1,19 @@
 {
-  'includes': [
-    'common.gypi',
-  ],
   'targets': [
     {
       'target_name': 'xps',
+      'product_name': 'skia_xps',
       'type': 'static_library',
+      'standalone_static_library': 1,
       'dependencies': [
-        'core.gyp:core',
-        'images.gyp:images',
-        'utils.gyp:utils',
-        'pdf.gyp:pdf', # needed to get SkBitSet
+        'skia_lib.gyp:skia_lib',
+        'sfnt.gyp:sfnt',
       ],
       'include_dirs': [
         '../include/device/xps',
         '../include/utils/win',
         '../src/core', # needed to get SkGlyphCache.h
+        '../src/utils', # needed to get SkBitSet.h
       ],
       'sources': [
         '../include/device/xps/SkConstexprMath.h',
@@ -27,8 +25,8 @@
         [ 'skia_os == "win"', {
           'link_settings': {
             'libraries': [
-              'T2Embed.lib',
-              'FontSub.lib',
+              '-lt2embed.lib',
+              '-lfontsub.lib',
             ],
           },
         },{ #else if 'skia_os != "win"'
@@ -54,14 +52,9 @@
         ],
         'include_dirs': [
           '../include/device/xps',
+          '../src/utils', # needed to get SkBitSet.h
         ],
       },
     },
   ],
 }
-
-# Local Variables:
-# tab-width:2
-# indent-tabs-mode:nil
-# End:
-# vim: set expandtab tabstop=2 shiftwidth=2:

@@ -7,13 +7,26 @@
  */
 
 
+#include "SkData.h"
 #include "SkGeometry.h"
 #include "SkPaint.h"
 #include "SkPath.h"
+#include "SkPDFResourceDict.h"
 #include "SkPDFUtils.h"
 #include "SkStream.h"
 #include "SkString.h"
 #include "SkPDFTypes.h"
+
+//static
+SkPDFArray* SkPDFUtils::RectToArray(const SkRect& rect) {
+    SkPDFArray* result = new SkPDFArray();
+    result->reserve(4);
+    result->appendScalar(rect.fLeft);
+    result->appendScalar(rect.fTop);
+    result->appendScalar(rect.fRight);
+    result->appendScalar(rect.fBottom);
+    return result;
+}
 
 // static
 SkPDFArray* SkPDFUtils::MatrixToArray(const SkMatrix& matrix) {
@@ -98,7 +111,23 @@ void SkPDFUtils::AppendRectangle(const SkRect& rect, SkWStream* content) {
 }
 
 // static
-void SkPDFUtils::EmitPath(const SkPath& path, SkWStream* content) {
+void SkPDFUtils::EmitPath(const SkPath& path, SkPaint::Style paintStyle,
+                          SkWStream* content) {
+    // Filling a path with no area results in a drawing in PDF renderers but
+    // Chrome expects to be able to draw some such entities with no visible
+    // result, so we detect those cases and discard the drawing for them.
+    // Specifically: moveTo(X), lineTo(Y) and moveTo(X), lineTo(X), lineTo(Y).
+    enum SkipFillState {
+        kEmpty_SkipFillState         = 0,
+        kSingleLine_SkipFillState    = 1,
+        kNonSingleLine_SkipFillState = 2,
+    };
+    SkipFillState fillState = kEmpty_SkipFillState;
+    if (paintStyle != SkPaint::kFill_Style) {
+        fillState = kNonSingleLine_SkipFillState;
+    }
+    SkPoint lastMovePt = SkPoint::Make(0,0);
+    SkDynamicMemoryWStream currentSegment;
     SkPoint args[4];
     SkPath::Iter iter(path, false);
     for (SkPath::Verb verb = iter.next(args);
@@ -107,29 +136,51 @@ void SkPDFUtils::EmitPath(const SkPath& path, SkWStream* content) {
         // args gets all the points, even the implicit first point.
         switch (verb) {
             case SkPath::kMove_Verb:
-                MoveTo(args[0].fX, args[0].fY, content);
+                MoveTo(args[0].fX, args[0].fY, &currentSegment);
+                lastMovePt = args[0];
+                fillState = kEmpty_SkipFillState;
                 break;
             case SkPath::kLine_Verb:
-                AppendLine(args[1].fX, args[1].fY, content);
+                AppendLine(args[1].fX, args[1].fY, &currentSegment);
+                if (fillState == kEmpty_SkipFillState) {
+                   if (args[0] != lastMovePt) {
+                       fillState = kSingleLine_SkipFillState;
+                   }
+                } else if (fillState == kSingleLine_SkipFillState) {
+                    fillState = kNonSingleLine_SkipFillState;
+                }
                 break;
             case SkPath::kQuad_Verb: {
                 SkPoint cubic[4];
                 SkConvertQuadToCubic(args, cubic);
                 AppendCubic(cubic[1].fX, cubic[1].fY, cubic[2].fX, cubic[2].fY,
-                            cubic[3].fX, cubic[3].fY, content);
+                            cubic[3].fX, cubic[3].fY, &currentSegment);
+                fillState = kNonSingleLine_SkipFillState;
                 break;
             }
             case SkPath::kCubic_Verb:
                 AppendCubic(args[1].fX, args[1].fY, args[2].fX, args[2].fY,
-                            args[3].fX, args[3].fY, content);
+                            args[3].fX, args[3].fY, &currentSegment);
+                fillState = kNonSingleLine_SkipFillState;
                 break;
             case SkPath::kClose_Verb:
-                ClosePath(content);
+                if (fillState != kSingleLine_SkipFillState) {
+                    ClosePath(&currentSegment);
+                    SkData* data = currentSegment.copyToData();
+                    content->write(data->data(), data->size());
+                    data->unref();
+                }
+                currentSegment.reset();
                 break;
             default:
                 SkASSERT(false);
                 break;
         }
+    }
+    if (currentSegment.bytesWritten() > 0) {
+        SkData* data = currentSegment.copyToData();
+        content->write(data->data(), data->size());
+        data->unref();
     }
 }
 
@@ -167,14 +218,32 @@ void SkPDFUtils::StrokePath(SkWStream* content) {
 
 // static
 void SkPDFUtils::DrawFormXObject(int objectIndex, SkWStream* content) {
-    content->writeText("/X");
-    content->writeDecAsText(objectIndex);
+    content->writeText("/");
+    content->writeText(SkPDFResourceDict::getResourceName(
+            SkPDFResourceDict::kXObject_ResourceType,
+            objectIndex).c_str());
     content->writeText(" Do\n");
 }
 
 // static
 void SkPDFUtils::ApplyGraphicState(int objectIndex, SkWStream* content) {
-    content->writeText("/G");
-    content->writeDecAsText(objectIndex);
+    content->writeText("/");
+    content->writeText(SkPDFResourceDict::getResourceName(
+            SkPDFResourceDict::kExtGState_ResourceType,
+            objectIndex).c_str());
     content->writeText(" gs\n");
+}
+
+// static
+void SkPDFUtils::ApplyPattern(int objectIndex, SkWStream* content) {
+    // Select Pattern color space (CS, cs) and set pattern object as current
+    // color (SCN, scn)
+    SkString resourceName = SkPDFResourceDict::getResourceName(
+            SkPDFResourceDict::kPattern_ResourceType,
+            objectIndex);
+    content->writeText("/Pattern CS/Pattern cs/");
+    content->writeText(resourceName.c_str());
+    content->writeText(" SCN/");
+    content->writeText(resourceName.c_str());
+    content->writeText(" scn\n");
 }

@@ -20,10 +20,10 @@ namespace skiagm {
 static const SkScalar SW = SkIntToScalar(W);
 static const SkScalar SH = SkIntToScalar(H);
 
-class StrokeRectGM : public GM {
+class StrokeRectsGM : public GM {
 public:
-    StrokeRectGM() {}
-    
+    StrokeRectsGM() {}
+
 protected:
     virtual SkString onShortName() {
         return SkString("strokerects");
@@ -33,14 +33,14 @@ protected:
         return make_isize(W*2, H*2);
     }
 
-    static void rnd_rect(SkRect* r, SkRandom& rand) {
+    static void rnd_rect(SkRect* r, SkLCGRandom& rand) {
         SkScalar x = rand.nextUScalar1() * W;
         SkScalar y = rand.nextUScalar1() * H;
         SkScalar w = rand.nextUScalar1() * (W >> 2);
         SkScalar h = rand.nextUScalar1() * (H >> 2);
         SkScalar hoffset = rand.nextSScalar1();
         SkScalar woffset = rand.nextSScalar1();
-        
+
         r->set(x, y, x + w, y + h);
         r->offset(-w/2 + woffset, -h/2 + hoffset);
     }
@@ -61,7 +61,7 @@ protected:
                         , SW - SkIntToScalar(2), SH - SkIntToScalar(2)
                 ));
 
-                SkRandom rand;
+                SkLCGRandom rand;
                 for (int i = 0; i < N; i++) {
                     SkRect r;
                     rnd_rect(&r, rand);
@@ -70,15 +70,14 @@ protected:
             }
         }
     }
-    
+
 private:
     typedef GM INHERITED;
 };
 
 //////////////////////////////////////////////////////////////////////////////
 
-static GM* MyFactory(void*) { return new StrokeRectGM; }
+static GM* MyFactory(void*) { return new StrokeRectsGM; }
 static GMRegistry reg(MyFactory);
 
 }
-

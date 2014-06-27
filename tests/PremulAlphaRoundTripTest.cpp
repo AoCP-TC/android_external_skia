@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
@@ -9,12 +8,14 @@
 #include "Test.h"
 #include "SkCanvas.h"
 #include "SkConfig8888.h"
+#include "SkBitmapDevice.h"
+
+#if SK_SUPPORT_GPU
+#include "GrContextFactory.h"
 #include "SkGpuDevice.h"
+#endif
 
-
-namespace {
-
-void fillCanvas(SkCanvas* canvas, SkCanvas::Config8888 unpremulConfig) {
+static void fillCanvas(SkCanvas* canvas, SkCanvas::Config8888 unpremulConfig) {
     SkBitmap bmp;
     bmp.setConfig(SkBitmap::kARGB_8888_Config, 256, 256);
     bmp.allocPixels();
@@ -31,76 +32,84 @@ void fillCanvas(SkCanvas* canvas, SkCanvas::Config8888 unpremulConfig) {
 
 static const SkCanvas::Config8888 gUnpremulConfigs[] = {
     SkCanvas::kNative_Unpremul_Config8888,
-/**
- * There is a bug in Ganesh (http://code.google.com/p/skia/issues/detail?id=438)
- * that causes the readback of pixels from BGRA canvas to an RGBA bitmap to
- * fail. This should be removed as soon as the issue above is resolved.
- */
-#if !defined(SK_BUILD_FOR_ANDROID)
     SkCanvas::kBGRA_Unpremul_Config8888,
-#endif
     SkCanvas::kRGBA_Unpremul_Config8888,
 };
 
-void PremulAlphaRoundTripTest(skiatest::Reporter* reporter,
-                              GrContext* context) {
-    SkCanvas canvas;
+static void PremulAlphaRoundTripTest(skiatest::Reporter* reporter, GrContextFactory* factory) {
+    SkAutoTUnref<SkBaseDevice> device;
     for (int dtype = 0; dtype < 2; ++dtype) {
-        if (0 == dtype) {
-            canvas.setDevice(new SkDevice(SkBitmap::kARGB_8888_Config,
-                                          256,
-                                          256,
-                                          false))->unref();
-        } else {
-#if SK_SCALAR_IS_FIXED
-            // GPU device known not to work in the fixed pt build.
-            continue;
-#endif
-            canvas.setDevice(new SkGpuDevice(context,
-                                             SkBitmap::kARGB_8888_Config,
-                                             256,
-                                             256))->unref();
+
+        int glCtxTypeCnt = 1;
+#if SK_SUPPORT_GPU
+        if (0 != dtype)  {
+            glCtxTypeCnt = GrContextFactory::kGLContextTypeCnt;
         }
+#endif
+        for (int glCtxType = 0; glCtxType < glCtxTypeCnt; ++glCtxType) {
+            if (0 == dtype) {
+                device.reset(new SkBitmapDevice(SkBitmap::kARGB_8888_Config,
+                                                256,
+                                                256,
+                                                false));
+            } else {
+#if SK_SUPPORT_GPU
+                GrContextFactory::GLContextType type =
+                    static_cast<GrContextFactory::GLContextType>(glCtxType);
+                if (!GrContextFactory::IsRenderingGLContext(type)) {
+                    continue;
+                }
+                GrContext* context = factory->get(type);
+                if (NULL == context) {
+                    continue;
+                }
 
-        SkBitmap readBmp1;
-        readBmp1.setConfig(SkBitmap::kARGB_8888_Config, 256, 256);
-        readBmp1.allocPixels();
-        SkBitmap readBmp2;
-        readBmp2.setConfig(SkBitmap::kARGB_8888_Config, 256, 256);
-        readBmp2.allocPixels();
+                device.reset(new SkGpuDevice(context, SkBitmap::kARGB_8888_Config, 256, 256));
+#else
+                continue;
+#endif
+            }
+            SkCanvas canvas(device);
 
-        for (size_t upmaIdx = 0;
-             upmaIdx < SK_ARRAY_COUNT(gUnpremulConfigs);
-             ++upmaIdx) {
-            fillCanvas(&canvas, gUnpremulConfigs[upmaIdx]);
-            {
+            SkBitmap readBmp1;
+            readBmp1.setConfig(SkBitmap::kARGB_8888_Config, 256, 256);
+            readBmp1.allocPixels();
+            SkBitmap readBmp2;
+            readBmp2.setConfig(SkBitmap::kARGB_8888_Config, 256, 256);
+            readBmp2.allocPixels();
+
+            for (size_t upmaIdx = 0;
+                 upmaIdx < SK_ARRAY_COUNT(gUnpremulConfigs);
+                 ++upmaIdx) {
+                fillCanvas(&canvas, gUnpremulConfigs[upmaIdx]);
+                {
+                    SkAutoLockPixels alp1(readBmp1);
+                    SkAutoLockPixels alp2(readBmp2);
+                    sk_bzero(readBmp1.getPixels(), readBmp1.getSafeSize());
+                    sk_bzero(readBmp2.getPixels(), readBmp2.getSafeSize());
+                }
+
+                canvas.readPixels(&readBmp1, 0, 0, gUnpremulConfigs[upmaIdx]);
+                canvas.writePixels(readBmp1, 0, 0, gUnpremulConfigs[upmaIdx]);
+                canvas.readPixels(&readBmp2, 0, 0, gUnpremulConfigs[upmaIdx]);
+
                 SkAutoLockPixels alp1(readBmp1);
                 SkAutoLockPixels alp2(readBmp2);
-                sk_bzero(readBmp1.getPixels(), readBmp1.getSafeSize());
-                sk_bzero(readBmp2.getPixels(), readBmp2.getSafeSize());
-            }
-
-            canvas.readPixels(&readBmp1, 0, 0, gUnpremulConfigs[upmaIdx]);
-            canvas.writePixels(readBmp1, 0, 0, gUnpremulConfigs[upmaIdx]);
-            canvas.readPixels(&readBmp2, 0, 0, gUnpremulConfigs[upmaIdx]);
-
-            SkAutoLockPixels alp1(readBmp1);
-            SkAutoLockPixels alp2(readBmp2);
-            uint32_t* pixels1 =
-                reinterpret_cast<uint32_t*>(readBmp1.getPixels());
-            uint32_t* pixels2 =
-                reinterpret_cast<uint32_t*>(readBmp2.getPixels());
-            for (int y = 0; y < 256; ++y) {
-                for (int x = 0; x < 256; ++x) {
-                    int i = y * 256 + x;
-                    REPORTER_ASSERT(reporter, pixels1[i] == pixels2[i]);
+                uint32_t* pixels1 =
+                    reinterpret_cast<uint32_t*>(readBmp1.getPixels());
+                uint32_t* pixels2 =
+                    reinterpret_cast<uint32_t*>(readBmp2.getPixels());
+                bool success = true;
+                for (int y = 0; y < 256 && success; ++y) {
+                    for (int x = 0; x < 256 && success; ++x) {
+                        int i = y * 256 + x;
+                        REPORTER_ASSERT(reporter, success = pixels1[i] == pixels2[i]);
+                    }
                 }
             }
         }
     }
 }
-}
 
 #include "TestClassDef.h"
 DEFINE_GPUTESTCLASS("PremulAlphaRoundTripTest", PremulAlphaRoundTripTestClass, PremulAlphaRoundTripTest)
-

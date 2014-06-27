@@ -11,14 +11,14 @@
 
 #include "SkCanvas.h"
 
-class SkNWayCanvas : public SkCanvas {
+class SK_API SkNWayCanvas : public SkCanvas {
 public:
     SkNWayCanvas(int width, int height);
     virtual ~SkNWayCanvas();
 
-    void addCanvas(SkCanvas*);
-    void removeCanvas(SkCanvas*);
-    void removeAll();
+    virtual void addCanvas(SkCanvas*);
+    virtual void removeCanvas(SkCanvas*);
+    virtual void removeAll();
 
     ///////////////////////////////////////////////////////////////////////////
     // These are forwarded to the N canvases we're referencing
@@ -34,21 +34,28 @@ public:
     virtual bool concat(const SkMatrix& matrix) SK_OVERRIDE;
     virtual void setMatrix(const SkMatrix& matrix) SK_OVERRIDE;
     virtual bool clipRect(const SkRect&, SkRegion::Op, bool) SK_OVERRIDE;
+    virtual bool clipRRect(const SkRRect&, SkRegion::Op, bool) SK_OVERRIDE;
     virtual bool clipPath(const SkPath&, SkRegion::Op, bool) SK_OVERRIDE;
     virtual bool clipRegion(const SkRegion& deviceRgn,
                             SkRegion::Op) SK_OVERRIDE;
-
+    virtual void clear(SkColor) SK_OVERRIDE;
     virtual void drawPaint(const SkPaint& paint) SK_OVERRIDE;
     virtual void drawPoints(PointMode mode, size_t count, const SkPoint pts[],
                             const SkPaint&) SK_OVERRIDE;
-    virtual void drawRect(const SkRect& rect, const SkPaint&) SK_OVERRIDE;
+    virtual void drawRect(const SkRect&, const SkPaint&) SK_OVERRIDE;
+    virtual void drawOval(const SkRect&, const SkPaint&) SK_OVERRIDE;
+    virtual void drawRRect(const SkRRect&, const SkPaint&) SK_OVERRIDE;
     virtual void drawPath(const SkPath& path, const SkPaint&) SK_OVERRIDE;
     virtual void drawBitmap(const SkBitmap& bitmap, SkScalar left, SkScalar top,
                             const SkPaint*) SK_OVERRIDE;
-    virtual void drawBitmapRect(const SkBitmap& bitmap, const SkIRect* src,
-                                const SkRect& dst, const SkPaint*) SK_OVERRIDE;
+    virtual void drawBitmapRectToRect(const SkBitmap& bitmap, const SkRect* src,
+                                      const SkRect& dst, const SkPaint* paint,
+                                      DrawBitmapRectFlags flags) SK_OVERRIDE;
     virtual void drawBitmapMatrix(const SkBitmap& bitmap, const SkMatrix& m,
                                   const SkPaint*) SK_OVERRIDE;
+    virtual void drawBitmapNine(const SkBitmap& bitmap, const SkIRect& center,
+                                const SkRect& dst,
+                                const SkPaint* paint = NULL) SK_OVERRIDE;
     virtual void drawSprite(const SkBitmap& bitmap, int left, int top,
                             const SkPaint*) SK_OVERRIDE;
     virtual void drawText(const void* text, size_t byteLength, SkScalar x,
@@ -67,18 +74,23 @@ public:
                               const SkColor colors[], SkXfermode* xmode,
                               const uint16_t indices[], int indexCount,
                               const SkPaint&) SK_OVERRIDE;
+    virtual void drawData(const void* data, size_t length) SK_OVERRIDE;
 
     virtual SkBounder* setBounder(SkBounder*) SK_OVERRIDE;
     virtual SkDrawFilter* setDrawFilter(SkDrawFilter*) SK_OVERRIDE;
 
-private:
+    virtual void beginCommentGroup(const char* description) SK_OVERRIDE;
+    virtual void addComment(const char* kywd, const char* value) SK_OVERRIDE;
+    virtual void endCommentGroup() SK_OVERRIDE;
+
+protected:
     SkTDArray<SkCanvas*> fList;
 
     class Iter;
 
+private:
     typedef SkCanvas INHERITED;
 };
 
 
 #endif
-

@@ -11,7 +11,6 @@ namespace skiagm {
 
 static const char* gConfigNames[] = {
     "unknown config",
-    "A1",
     "A8",
     "Index8",
     "565",
@@ -21,7 +20,8 @@ static const char* gConfigNames[] = {
 
 SkBitmap::Config gConfigs[] = {
   SkBitmap::kRGB_565_Config,
-  SkBitmap::kARGB_4444_Config,
+  SkBitmap::kARGB_4444_Config,  // TODO(edisonn): Should we remove it from GM?
+                                // it fails to copy in bitmap with this config.
   SkBitmap::kARGB_8888_Config,
 };
 
@@ -30,13 +30,17 @@ SkBitmap::Config gConfigs[] = {
 static void draw_checks(SkCanvas* canvas, int width, int height) {
     SkPaint paint;
     paint.setColor(SK_ColorRED);
-    canvas->drawRectCoords(0, 0, width / 2, height / 2, paint);
+    canvas->drawRectCoords(SkIntToScalar(0), SkIntToScalar(0),
+        SkIntToScalar(width / 2), SkIntToScalar(height / 2), paint);
     paint.setColor(SK_ColorGREEN);
-    canvas->drawRectCoords(width / 2, 0, width, height / 2, paint);
+    canvas->drawRectCoords(SkIntToScalar(width / 2), SkIntToScalar(0),
+        SkIntToScalar(width), SkIntToScalar(height / 2), paint);
     paint.setColor(SK_ColorBLUE);
-    canvas->drawRectCoords(0, height / 2, width / 2, height, paint);
+    canvas->drawRectCoords(SkIntToScalar(0), SkIntToScalar(height / 2),
+        SkIntToScalar(width / 2), SkIntToScalar(height), paint);
     paint.setColor(SK_ColorYELLOW);
-    canvas->drawRectCoords(width / 2, height / 2, width, height, paint);
+    canvas->drawRectCoords(SkIntToScalar(width / 2), SkIntToScalar(height / 2),
+        SkIntToScalar(width), SkIntToScalar(height), paint);
 }
 
 class BitmapCopyGM : public GM {
@@ -61,8 +65,11 @@ protected:
         SkScalar horizMargin(SkIntToScalar(10));
         SkScalar vertMargin(SkIntToScalar(10));
 
-        draw_checks(canvas, 40, 40);
-        SkBitmap src = canvas->getDevice()->accessBitmap(false);
+        SkBitmapDevice devTmp(SkBitmap::kARGB_8888_Config, 40, 40, false);
+        SkCanvas canvasTmp(&devTmp);
+
+        draw_checks(&canvasTmp, 40, 40);
+        SkBitmap src = canvasTmp.getTopDevice()->accessBitmap(false);
 
         for (unsigned i = 0; i < NUM_CONFIGS; ++i) {
             if (!src.deepCopyTo(&fDst[i], gConfigs[i])) {
@@ -107,7 +114,8 @@ protected:
         }
     }
 
-    virtual uint32_t onGetFlags() const { return kSkipPicture_Flag; }
+    virtual uint32_t onGetFlags() const { return kSkipPicture_Flag
+                                               | kSkipPipe_Flag; }
 
 private:
     typedef GM INHERITED;
@@ -115,7 +123,8 @@ private:
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifndef SK_BUILD_FOR_ANDROID
 static GM* MyFactory(void*) { return new BitmapCopyGM; }
 static GMRegistry reg(MyFactory);
-
+#endif
 }

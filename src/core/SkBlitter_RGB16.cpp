@@ -35,14 +35,14 @@ void sk_dither_memset16(uint16_t dst[], uint16_t value, uint16_t other,
             count -= 1;
             SkTSwap(value, other);
         }
-        
+
         // fast way to set [value,other] pairs
 #ifdef SK_CPU_BENDIAN
         sk_memset32((uint32_t*)dst, (value << 16) | other, count >> 1);
 #else
         sk_memset32((uint32_t*)dst, (other << 16) | value, count >> 1);
 #endif
-        
+
         if (count & 1) {
             dst[count - 1] = value;
         }
@@ -62,7 +62,7 @@ public:
     virtual void blitMask(const SkMask&,
                           const SkIRect&);
     virtual const SkBitmap* justAnOpaqueColor(uint32_t*);
-    
+
 protected:
     SkPMColor   fSrcColor32;
     uint32_t    fExpandedRaw16;
@@ -71,10 +71,10 @@ protected:
     uint16_t    fRawColor16;    // unscaled
     uint16_t    fRawDither16;   // unscaled
     SkBool8     fDoDither;
-    
+
     // illegal
     SkRGB16_Blitter& operator=(const SkRGB16_Blitter&);
-    
+
     typedef SkRasterBlitter INHERITED;
 };
 
@@ -88,7 +88,7 @@ public:
     virtual void blitRect(int x, int y, int width, int height);
     virtual void blitMask(const SkMask&,
                           const SkIRect&);
-    
+
 private:
     typedef SkRGB16_Blitter INHERITED;
 };
@@ -100,7 +100,7 @@ public:
     virtual void blitMask(const SkMask&, const SkIRect&);
     virtual void blitAntiH(int x, int y, const SkAlpha* antialias,
                            const int16_t* runs);
-    
+
 private:
     typedef SkRGB16_Opaque_Blitter INHERITED;
 };
@@ -114,16 +114,16 @@ public:
     virtual void blitAntiH(int x, int y, const SkAlpha* antialias,
                            const int16_t* runs);
     virtual void blitRect(int x, int y, int width, int height);
-    
+
 protected:
     SkPMColor*      fBuffer;
     SkBlitRow::Proc fOpaqueProc;
     SkBlitRow::Proc fAlphaProc;
-    
+
 private:
     // illegal
     SkRGB16_Shader_Blitter& operator=(const SkRGB16_Shader_Blitter&);
-    
+
     typedef SkShaderBlitter INHERITED;
 };
 
@@ -135,7 +135,7 @@ public:
     virtual void blitAntiH(int x, int y, const SkAlpha* antialias,
                            const int16_t* runs);
     virtual void blitRect(int x, int y, int width, int height);
-    
+
 private:
     typedef SkRGB16_Shader_Blitter INHERITED;
 };
@@ -147,15 +147,15 @@ public:
     virtual void blitH(int x, int y, int width);
     virtual void blitAntiH(int x, int y, const SkAlpha* antialias,
                            const int16_t* runs);
-    
+
 private:
     SkXfermode* fXfermode;
     SkPMColor*  fBuffer;
     uint8_t*    fAAExpand;
-    
+
     // illegal
     SkRGB16_Shader_Xfermode_Blitter& operator=(const SkRGB16_Shader_Xfermode_Blitter&);
-    
+
     typedef SkShaderBlitter INHERITED;
 };
 
@@ -211,7 +211,7 @@ void SkRGB16_Black_Blitter::blitMask(const SkMask& mask,
         const uint8_t* SK_RESTRICT alpha = mask.getAddr8(clip.fLeft, clip.fTop);
         unsigned width = clip.width();
         unsigned height = clip.height();
-        unsigned deviceRB = fDevice.rowBytes() - (width << 1);
+        size_t deviceRB = fDevice.rowBytes() - (width << 1);
         unsigned maskRB = mask.fRowBytes - width;
 
         SkASSERT((int)height > 0);
@@ -291,7 +291,7 @@ void SkRGB16_Opaque_Blitter::blitH(int x, int y, int width) {
 
 // return 1 or 0 from a bool
 static inline int Bool2Int(int value) {
-	return !!value;
+    return !!value;
 }
 
 void SkRGB16_Opaque_Blitter::blitAntiH(int x, int y,
@@ -381,80 +381,70 @@ void SkRGB16_Opaque_Blitter::blitMask(const SkMask& mask,
     const uint8_t* SK_RESTRICT alpha = mask.getAddr8(clip.fLeft, clip.fTop);
     int width = clip.width();
     int height = clip.height();
-    unsigned    deviceRB = fDevice.rowBytes() - (width << 1);
+    size_t      deviceRB = fDevice.rowBytes() - (width << 1);
     unsigned    maskRB = mask.fRowBytes - width;
     uint32_t    expanded32 = fExpandedRaw16;
 
 #ifdef SK_USE_NEON
-#define	UNROLL	8
+#define    UNROLL    8
     do {
         int w = width;
         if (w >= UNROLL) {
-            uint32x4_t color;		/* can use same one */
-            uint32x4_t dev_lo, dev_hi;
-            uint32x4_t t1, t2;
-            uint32x4_t wn1, wn2;
-            uint16x4_t odev_lo, odev_hi;
-            uint16x4_t alpha_lo, alpha_hi;
-            uint16x8_t  alpha_full;
-            
+            uint32x4_t color, dev_lo, dev_hi;
+            uint32x4_t wn1, wn2, tmp;
+            uint32x4_t vmask_g16, vmask_ng16;
+            uint16x8_t valpha, vdev;
+            uint16x4_t odev_lo, odev_hi, valpha_lo, valpha_hi;
+
+            // prepare constants
+            vmask_g16 = vdupq_n_u32(SK_G16_MASK_IN_PLACE);
+            vmask_ng16 = vdupq_n_u32(~SK_G16_MASK_IN_PLACE);
             color = vdupq_n_u32(expanded32);
-            
+
             do {
-                /* alpha is 8x8, widen and split to get pair of 16x4's */
-                alpha_full = vmovl_u8(vld1_u8(alpha));
-                alpha_full = vaddq_u16(alpha_full, vshrq_n_u16(alpha_full,7));
-                alpha_full = vshrq_n_u16(alpha_full, 3);
-                alpha_lo = vget_low_u16(alpha_full);
-                alpha_hi = vget_high_u16(alpha_full);
-                
-                dev_lo = vmovl_u16(vld1_u16(device));
-                dev_hi = vmovl_u16(vld1_u16(device+4));
-                
-                /* unpack in 32 bits */
-                dev_lo = vorrq_u32(
-                                   vandq_u32(dev_lo, vdupq_n_u32(0x0000F81F)),
-                                   vshlq_n_u32(vandq_u32(dev_lo, 
-                                                         vdupq_n_u32(0x000007E0)),
-                                               16)
-                                   );
-                dev_hi = vorrq_u32(
-                                   vandq_u32(dev_hi, vdupq_n_u32(0x0000F81F)),
-                                   vshlq_n_u32(vandq_u32(dev_hi, 
-                                                         vdupq_n_u32(0x000007E0)),
-                                               16)
-                                   );
-                
-                /* blend the two */
-                t1 = vmulq_u32(vsubq_u32(color, dev_lo), vmovl_u16(alpha_lo));
-                t1 = vshrq_n_u32(t1, 5);
-                dev_lo = vaddq_u32(dev_lo, t1);
-                
-                t1 = vmulq_u32(vsubq_u32(color, dev_hi), vmovl_u16(alpha_hi));
-                t1 = vshrq_n_u32(t1, 5);
-                dev_hi = vaddq_u32(dev_hi, t1);
-                
-                /* re-compact and store */
-                wn1 = vandq_u32(dev_lo, vdupq_n_u32(0x0000F81F)),
-                wn2 = vshrq_n_u32(dev_lo, 16);
-                wn2 = vandq_u32(wn2, vdupq_n_u32(0x000007E0));
-                odev_lo = vmovn_u32(vorrq_u32(wn1, wn2));
-                
-                wn1 = vandq_u32(dev_hi, vdupq_n_u32(0x0000F81F)),
-                wn2 = vshrq_n_u32(dev_hi, 16);
-                wn2 = vandq_u32(wn2, vdupq_n_u32(0x000007E0));
-                odev_hi = vmovn_u32(vorrq_u32(wn1, wn2));
-                
-                vst1_u16(device, odev_lo);
-                vst1_u16(device+4, odev_hi);
-                
+                // alpha is 8x8, widen and split to get a pair of 16x4
+                valpha = vaddw_u8(vdupq_n_u16(1), vld1_u8(alpha));
+                valpha = vshrq_n_u16(valpha, 3);
+                valpha_lo = vget_low_u16(valpha);
+                valpha_hi = vget_high_u16(valpha);
+
+                // load pixels
+                vdev = vld1q_u16(device);
+                dev_lo = vmovl_u16(vget_low_u16(vdev));
+                dev_hi = vmovl_u16(vget_high_u16(vdev));
+
+                // unpack them in 32 bits
+                dev_lo = (dev_lo & vmask_ng16) | vshlq_n_u32(dev_lo & vmask_g16, 16);
+                dev_hi = (dev_hi & vmask_ng16) | vshlq_n_u32(dev_hi & vmask_g16, 16);
+
+                // blend with color
+                tmp = (color - dev_lo) * vmovl_u16(valpha_lo);
+                tmp = vshrq_n_u32(tmp, 5);
+                dev_lo += tmp;
+
+                tmp = vmulq_u32(color - dev_hi, vmovl_u16(valpha_hi));
+                tmp = vshrq_n_u32(tmp, 5);
+                dev_hi += tmp;
+
+                // re-compact
+                wn1 = dev_lo & vmask_ng16;
+                wn2 = vshrq_n_u32(dev_lo, 16) & vmask_g16;
+                odev_lo = vmovn_u32(wn1 | wn2);
+
+                wn1 = dev_hi & vmask_ng16;
+                wn2 = vshrq_n_u32(dev_hi, 16) & vmask_g16;
+                odev_hi = vmovn_u32(wn1 | wn2);
+
+                // store
+                vst1q_u16(device, vcombine_u16(odev_lo, odev_hi));
+
                 device += UNROLL;
                 alpha += UNROLL;
                 w -= UNROLL;
             } while (w >= UNROLL);
         }
-        
-        /* residuals (which is everything if we have no neon) */
+
+        // residuals
         while (w > 0) {
             *device = blend_compact(expanded32, SkExpand_rgb_16(*device),
                                     SkAlpha255To256(*alpha++) >> 3);
@@ -464,7 +454,7 @@ void SkRGB16_Opaque_Blitter::blitMask(const SkMask& mask,
         device = (uint16_t*)((char*)device + deviceRB);
         alpha += maskRB;
     } while (--height != 0);
-#undef	UNROLL
+#undef    UNROLL
 #else   // non-neon code
     do {
         int w = width;
@@ -481,8 +471,8 @@ void SkRGB16_Opaque_Blitter::blitMask(const SkMask& mask,
 
 void SkRGB16_Opaque_Blitter::blitV(int x, int y, int height, SkAlpha alpha) {
     uint16_t* SK_RESTRICT device = fDevice.getAddr16(x, y);
-    unsigned    deviceRB = fDevice.rowBytes();
-    
+    size_t    deviceRB = fDevice.rowBytes();
+
     // TODO: respect fDoDither
     unsigned scale5 = SkAlpha255To256(alpha) >> 3;
     uint32_t src32 =  fExpandedRaw16 * scale5;
@@ -497,7 +487,7 @@ void SkRGB16_Opaque_Blitter::blitV(int x, int y, int height, SkAlpha alpha) {
 void SkRGB16_Opaque_Blitter::blitRect(int x, int y, int width, int height) {
     SkASSERT(x + width <= fDevice.width() && y + height <= fDevice.height());
     uint16_t* SK_RESTRICT device = fDevice.getAddr16(x, y);
-    unsigned    deviceRB = fDevice.rowBytes();
+    size_t      deviceRB = fDevice.rowBytes();
     uint16_t    color16 = fColor16;
 
     if (fDoDither) {
@@ -559,15 +549,33 @@ static uint32_t pmcolor_to_expand16(SkPMColor c) {
     return (g << 24) | (r << 13) | (b << 2);
 }
 
+extern "C" {
+void skia_androidopt_blend32_16_optimized(uint32_t src, unsigned scale, uint16_t **pdst, int *pcount) __attribute__((weak));
+}
+
+#ifdef NEON_BLIT_H
+extern "C" void blitH_NEON(uint16_t *dst, int count, uint32_t src_expand, unsigned int scale);
+#endif
+
 static inline void blend32_16_row(SkPMColor src, uint16_t dst[], int count) {
     SkASSERT(count > 0);
     uint32_t src_expand = pmcolor_to_expand16(src);
     unsigned scale = SkAlpha255To256(0xFF - SkGetPackedA32(src)) >> 3;
-    do {
+
+#ifdef NEON_BLIT_H
+    blitH_NEON(dst, count, src_expand, scale);
+#else
+    if (skia_androidopt_blend32_16_optimized) {
+        skia_androidopt_blend32_16_optimized(src_expand, scale, &dst, &count);
+    }
+
+    while (count > 0) {
         uint32_t dst_expand = SkExpand_rgb_16(*dst) * scale;
         *dst = SkCompact_rgb_16((src_expand + dst_expand) >> 5);
         dst += 1;
-    } while (--count != 0);
+        --count;
+    }
+#endif
 }
 
 void SkRGB16_Blitter::blitH(int x, int y, int width) {
@@ -579,7 +587,7 @@ void SkRGB16_Blitter::blitH(int x, int y, int width) {
     blend32_16_row(fSrcColor32, device, width);
 }
 
-#ifdef NEON_BLITANTIH
+#ifdef NEON_BLIT_ANTI_H
 extern "C" void blitAntiH_NEON(const SkAlpha* SK_RESTRICT antialias,
                                uint16_t * SK_RESTRICT device,
                                const int16_t* SK_RESTRICT runs,
@@ -592,7 +600,8 @@ void SkRGB16_Blitter::blitAntiH(int x, int y,
     uint16_t* SK_RESTRICT device = fDevice.getAddr16(x, y);
     uint32_t    srcExpanded = fExpandedRaw16;
     unsigned    scale = fScale;
-#ifdef NEON_BLITANTIH
+
+#ifdef NEON_BLIT_ANTI_H
     blitAntiH_NEON(antialias, device, runs, srcExpanded, scale);
 #else
     // TODO: respect fDoDither
@@ -651,7 +660,7 @@ void SkRGB16_Blitter::blitMask(const SkMask& mask,
     const uint8_t* SK_RESTRICT alpha = mask.getAddr8(clip.fLeft, clip.fTop);
     int width = clip.width();
     int height = clip.height();
-    unsigned    deviceRB = fDevice.rowBytes() - (width << 1);
+    size_t      deviceRB = fDevice.rowBytes() - (width << 1);
     unsigned    maskRB = mask.fRowBytes - width;
     uint32_t    color32 = fExpandedRaw16;
 
@@ -672,7 +681,7 @@ void SkRGB16_Blitter::blitMask(const SkMask& mask,
 
 void SkRGB16_Blitter::blitV(int x, int y, int height, SkAlpha alpha) {
     uint16_t* SK_RESTRICT device = fDevice.getAddr16(x, y);
-    unsigned    deviceRB = fDevice.rowBytes();
+    size_t    deviceRB = fDevice.rowBytes();
 
     // TODO: respect fDoDither
     unsigned scale5 = SkAlpha255To256(alpha) * fScale >> (8 + 3);
@@ -688,7 +697,7 @@ void SkRGB16_Blitter::blitV(int x, int y, int height, SkAlpha alpha) {
 void SkRGB16_Blitter::blitRect(int x, int y, int width, int height) {
     SkASSERT(x + width <= fDevice.width() && y + height <= fDevice.height());
     uint16_t* SK_RESTRICT device = fDevice.getAddr16(x, y);
-    unsigned    deviceRB = fDevice.rowBytes();
+    size_t    deviceRB = fDevice.rowBytes();
     SkPMColor src32 = fSrcColor32;
 
     while (--height >= 0) {
@@ -831,12 +840,12 @@ SkRGB16_Shader_Blitter::SkRGB16_Shader_Blitter(const SkBitmap& device,
 
     // compute SkBlitRow::Procs
     unsigned flags = 0;
-    
+
     uint32_t shaderFlags = fShaderFlags;
     // shaders take care of global alpha, so we never set it in SkBlitRow
     if (!(shaderFlags & SkShader::kOpaqueAlpha_Flag)) {
         flags |= SkBlitRow::kSrcPixelAlpha_Flag;
-        }
+    }
     // don't dither if the shader is really 16bit
     if (paint.isDither() && !(shaderFlags & SkShader::kIntrinsicly16_Flag)) {
         flags |= SkBlitRow::kDither_Flag;
@@ -1027,7 +1036,7 @@ void SkRGB16_Shader_Xfermode_Blitter::blitAntiH(int x, int y,
             SkASSERT(count > 0);
             aa = *antialias;
         }
-    } 
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1070,6 +1079,6 @@ SkBlitter* SkBlitter_ChooseD565(const SkBitmap& device, const SkPaint& paint,
                                   storageSize, (device, paint));
         }
     }
-    
+
     return blitter;
 }

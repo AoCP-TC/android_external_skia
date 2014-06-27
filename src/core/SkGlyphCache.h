@@ -13,9 +13,12 @@
 #include "SkBitmap.h"
 #include "SkChunkAlloc.h"
 #include "SkDescriptor.h"
+#include "SkGlyph.h"
 #include "SkScalerContext.h"
 #include "SkTemplates.h"
+#include "SkTDArray.h"
 
+struct SkDeviceProperties;
 class SkPaint;
 
 class SkGlyphCache_Globals;
@@ -92,8 +95,8 @@ public:
 
     /** Return the vertical metrics for this strike.
     */
-    const SkPaint::FontMetrics& getFontMetricsY() const {
-        return fFontMetricsY;
+    const SkPaint::FontMetrics& getFontMetrics() const {
+        return fFontMetrics;
     }
 
     const SkDescriptor& getDescriptor() const { return *fDesc; }
@@ -119,9 +122,6 @@ public:
     bool getAuxProcData(void (*auxProc)(void*), void** dataPtr) const;
     //! Add a proc/data pair to the glyphcache. proc should be non-null
     void setAuxProc(void (*auxProc)(void*), void* auxData);
-    //! If found, remove the proc/data pair from the glyphcache (does not
-    //  call the proc)
-    void removeAuxProc(void (*auxProc)(void*));
 
     SkScalerContext* getScalerContext() const { return fScalerContext; }
 
@@ -135,7 +135,7 @@ public:
         create a new one. If the proc() returns true, detach the cache and
         return it, otherwise leave it and return NULL.
     */
-    static SkGlyphCache* VisitCache(const SkDescriptor* desc,
+    static SkGlyphCache* VisitCache(SkTypeface*, const SkDescriptor* desc,
                                     bool (*proc)(const SkGlyphCache*, void*),
                                     void* context);
 
@@ -154,21 +154,10 @@ public:
         eventually get purged, and the win is that different thread will never
         block each other while a strike is being used.
     */
-    static SkGlyphCache* DetachCache(const SkDescriptor* desc) {
-        return VisitCache(desc, DetachProc, NULL);
+    static SkGlyphCache* DetachCache(SkTypeface* typeface,
+                                     const SkDescriptor* desc) {
+        return VisitCache(typeface, desc, DetachProc, NULL);
     }
-
-    /** Return the approximate number of bytes used by the font cache
-    */
-    static size_t GetCacheUsed();
-
-    /** This can be called to purge old font data, in an attempt to free
-        enough bytes such that the font cache is not using more than the
-        specified number of bytes. It is thread-safe, and may be called at
-        any time.
-        Return true if some amount of the cache was purged.
-    */
-    static bool SetCacheUsed(size_t bytesUsed);
 
 #ifdef SK_DEBUG
     void validate() const;
@@ -196,7 +185,8 @@ public:
     };
 
 private:
-    SkGlyphCache(const SkDescriptor*);
+    // we take ownership of the scalercontext
+    SkGlyphCache(SkTypeface*, const SkDescriptor*, SkScalerContext*);
     ~SkGlyphCache();
 
     enum MetricsType {
@@ -207,43 +197,19 @@ private:
     SkGlyph* lookupMetrics(uint32_t id, MetricsType);
     static bool DetachProc(const SkGlyphCache*, void*) { return true; }
 
-    void detach(SkGlyphCache** head) {
-        if (fPrev) {
-            fPrev->fNext = fNext;
-        } else {
-            *head = fNext;
-        }
-        if (fNext) {
-            fNext->fPrev = fPrev;
-        }
-        fPrev = fNext = NULL;
-    }
-
-    void attachToHead(SkGlyphCache** head) {
-        SkASSERT(NULL == fPrev && NULL == fNext);
-        if (*head) {
-            (*head)->fPrev = this;
-            fNext = *head;
-        }
-        *head = this;
-    }
-
     SkGlyphCache*       fNext, *fPrev;
     SkDescriptor*       fDesc;
     SkScalerContext*    fScalerContext;
-    SkPaint::FontMetrics fFontMetricsY;
+    SkPaint::FontMetrics fFontMetrics;
 
     enum {
-        kHashBits   = 12,
+        kHashBits   = 8,
         kHashCount  = 1 << kHashBits,
         kHashMask   = kHashCount - 1
     };
     SkGlyph*            fGlyphHash[kHashCount];
     SkTDArray<SkGlyph*> fGlyphArray;
     SkChunkAlloc        fGlyphAlloc;
-    SkChunkAlloc        fImageAlloc;
-
-    int fMetricsCount, fAdvanceCount;
 
     struct CharGlyphRec {
         uint32_t    fID;    // unichar + subpixel
@@ -252,15 +218,10 @@ private:
     // no reason to use the same kHashCount as fGlyphHash, but we do for now
     CharGlyphRec    fCharToGlyphHash[kHashCount];
 
-    enum {
-        // shift so that the top bits fall into kHashBits region
-        kShiftForHashIndex = SkGlyph::kSubShift +
-                             SkGlyph::kSubBits*2 -
-                             kHashBits
-    };
-
     static inline unsigned ID2HashIndex(uint32_t id) {
-        return (id ^ (id >> kShiftForHashIndex)) & kHashMask;
+        id ^= id >> 16;
+        id ^= id >> 8;
+        return id & kHashMask;
     }
 
     // used to track (approx) how much ram is tied-up in this cache
@@ -274,11 +235,7 @@ private:
     AuxProcRec* fAuxProcList;
     void invokeAndRemoveAuxProcs();
 
-    // This relies on the caller to have already acquired the mutex to access the global cache
-    static size_t InternalFreeCache(SkGlyphCache_Globals*, size_t bytesNeeded);
-
     inline static SkGlyphCache* FindTail(SkGlyphCache* head);
-    static size_t ComputeMemoryUsed(const SkGlyphCache* head);
 
     friend class SkGlyphCache_Globals;
 };
@@ -286,11 +243,13 @@ private:
 class SkAutoGlyphCache {
 public:
     SkAutoGlyphCache(SkGlyphCache* cache) : fCache(cache) {}
-    SkAutoGlyphCache(const SkDescriptor* desc) {
-        fCache = SkGlyphCache::DetachCache(desc);
+    SkAutoGlyphCache(SkTypeface* typeface, const SkDescriptor* desc) {
+        fCache = SkGlyphCache::DetachCache(typeface, desc);
     }
-    SkAutoGlyphCache(const SkPaint& paint, const SkMatrix* matrix) {
-        fCache = paint.detachCache(matrix);
+    SkAutoGlyphCache(const SkPaint& paint,
+                     const SkDeviceProperties* deviceProperties,
+                     const SkMatrix* matrix) {
+        fCache = paint.detachCache(deviceProperties, matrix);
     }
     ~SkAutoGlyphCache() {
         if (fCache) {
@@ -312,6 +271,6 @@ private:
 
     static bool DetachProc(const SkGlyphCache*, void*);
 };
+#define SkAutoGlyphCache(...) SK_REQUIRE_LOCAL_VAR(SkAutoGlyphCache)
 
 #endif
-

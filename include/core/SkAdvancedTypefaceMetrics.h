@@ -15,7 +15,6 @@
 #include "SkString.h"
 #include "SkTDArray.h"
 #include "SkTemplates.h"
-#include "SkTScopedPtr.h"
 
 /** \class SkAdvancedTypefaceMetrics
 
@@ -26,6 +25,8 @@
 
 class SkAdvancedTypefaceMetrics : public SkRefCnt {
 public:
+    SK_DECLARE_INST_COUNT(SkAdvancedTypefaceMetrics)
+
     SkString fFontName;
 
     enum FontType {
@@ -34,7 +35,7 @@ public:
         kCFF_Font,
         kTrueType_Font,
         kOther_Font,
-        kNotEmbeddable_Font,
+        kNotEmbeddable_Font
     };
     // The type of the underlying font program.  This field determines which
     // of the following fields are valid.  If it is kOther_Font or
@@ -50,13 +51,11 @@ public:
     enum StyleFlags {
         kFixedPitch_Style  = 0x00001,
         kSerif_Style       = 0x00002,
-        kSymbolic_Style    = 0x00004,
         kScript_Style      = 0x00008,
-        kNonsymbolic_Style = 0x00020,
         kItalic_Style      = 0x00040,
         kAllCaps_Style     = 0x10000,
         kSmallCaps_Style   = 0x20000,
-        kForceBold_Style   = 0x40000,
+        kForceBold_Style   = 0x40000
     };
     uint16_t fStyle;        // Font style characteristics.
     int16_t fItalicAngle;   // Counterclockwise degrees from vertical of the
@@ -75,7 +74,7 @@ public:
       kHAdvance_PerGlyphInfo   = 0x1, // Populate horizontal advance data.
       kVAdvance_PerGlyphInfo   = 0x2, // Populate vertical advance data.
       kGlyphNames_PerGlyphInfo = 0x4, // Populate glyph names (Type 1 only).
-      kToUnicode_PerGlyphInfo  = 0x8, // Populate ToUnicode table, ignored
+      kToUnicode_PerGlyphInfo  = 0x8  // Populate ToUnicode table, ignored
                                       // for Type 1 fonts
     };
 
@@ -84,13 +83,13 @@ public:
         enum MetricType {
             kDefault,  // Default advance: fAdvance.count = 1
             kRange,    // Advances for a range: fAdvance.count = fEndID-fStartID
-            kRun,      // fStartID-fEndID have same advance: fAdvance.count = 1
+            kRun       // fStartID-fEndID have same advance: fAdvance.count = 1
         };
         MetricType fType;
         uint16_t fStartId;
         uint16_t fEndId;
         SkTDArray<Data> fAdvance;
-        SkTScopedPtr<AdvanceMetric<Data> > fNext;
+        SkAutoTDelete<AdvanceMetric<Data> > fNext;
     };
 
     struct VerticalMetric {
@@ -102,16 +101,19 @@ public:
     typedef AdvanceMetric<VerticalMetric> VerticalAdvanceRange;
 
     // This is indexed by glyph id.
-    SkTScopedPtr<WidthRange> fGlyphWidths;
+    SkAutoTDelete<WidthRange> fGlyphWidths;
     // Only used for Vertical CID fonts.
-    SkTScopedPtr<VerticalAdvanceRange> fVerticalMetrics;
+    SkAutoTDelete<VerticalAdvanceRange> fVerticalMetrics;
 
     // The names of each glyph, only populated for postscript fonts.
-    SkTScopedPtr<SkAutoTArray<SkString> > fGlyphNames;
+    SkAutoTDelete<SkAutoTArray<SkString> > fGlyphNames;
 
     // The mapping from glyph to Unicode, only populated if
     // kToUnicode_PerGlyphInfo is passed to GetAdvancedTypefaceMetrics.
     SkTDArray<SkUnichar> fGlyphToUnicode;
+
+private:
+    typedef SkRefCnt INHERITED;
 };
 
 namespace skia_advanced_typeface_metrics_utils {
@@ -122,7 +124,7 @@ void resetRange(SkAdvancedTypefaceMetrics::AdvanceMetric<Data>* range,
 
 template <typename Data>
 SkAdvancedTypefaceMetrics::AdvanceMetric<Data>* appendRange(
-        SkTScopedPtr<SkAdvancedTypefaceMetrics::AdvanceMetric<Data> >* nextSlot,
+        SkAutoTDelete<SkAdvancedTypefaceMetrics::AdvanceMetric<Data> >* nextSlot,
         int startId);
 
 template <typename Data>

@@ -20,7 +20,7 @@ protected:
     SkString onShortName() {
         return SkString("emptypath");
     }
-        
+
     SkISize onISize() { return make_isize(600, 280); }
 
     void drawEmpty(SkCanvas* canvas,
@@ -38,7 +38,7 @@ protected:
         canvas->drawPath(path, paint);
         canvas->restore();
     }
-    
+
     virtual void onDraw(SkCanvas* canvas) {
         struct FillAndName {
             SkPath::FillType fFill;
@@ -72,7 +72,7 @@ protected:
                             20 * SK_Scalar1,
                             titlePaint);
 
-        SkRandom rand;
+        SkLCGRandom rand;
         SkRect rect = SkRect::MakeWH(100*SK_Scalar1, 30*SK_Scalar1);
         int i = 0;
         canvas->save();
@@ -120,7 +120,7 @@ protected:
         canvas->restore();
         canvas->restore();
     }
-    
+
 private:
     typedef GM INHERITED;
 };

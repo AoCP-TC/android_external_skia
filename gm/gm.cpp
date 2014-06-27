@@ -8,8 +8,13 @@
 #include "gm.h"
 using namespace skiagm;
 
+SkString GM::gResourcePath;
+
 GM::GM() {
     fBGColor = SK_ColorWHITE;
+    fCanvasIsDeferred = false;
+    fHaveCalledOnceBeforeDraw = false;
+    fStarterMatrix.reset();
 }
 GM::~GM() {}
 
@@ -19,10 +24,18 @@ void GM::draw(SkCanvas* canvas) {
 }
 
 void GM::drawContent(SkCanvas* canvas) {
+    if (!fHaveCalledOnceBeforeDraw) {
+        fHaveCalledOnceBeforeDraw = true;
+        this->onOnceBeforeDraw();
+    }
     this->onDraw(canvas);
 }
 
 void GM::drawBackground(SkCanvas* canvas) {
+    if (!fHaveCalledOnceBeforeDraw) {
+        fHaveCalledOnceBeforeDraw = true;
+        this->onOnceBeforeDraw();
+    }
     this->onDrawBackground(canvas);
 }
 
@@ -38,7 +51,7 @@ void GM::setBGColor(SkColor color) {
 }
 
 void GM::onDrawBackground(SkCanvas* canvas) {
-    canvas->drawColor(fBGColor);
+    canvas->drawColor(fBGColor, SkXfermode::kSrc_Mode);
 }
 
 void GM::drawSizeBounds(SkCanvas* canvas, SkColor color) {
@@ -51,4 +64,4 @@ void GM::drawSizeBounds(SkCanvas* canvas, SkColor color) {
 }
 
 // need to explicitly declare this, or we get some weird infinite loop llist
-template GMRegistry* SkTRegistry<GM*, void*>::gHead;
+template GMRegistry* SkTRegistry<GM*(*)(void*)>::gHead;

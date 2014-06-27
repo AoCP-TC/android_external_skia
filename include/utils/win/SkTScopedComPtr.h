@@ -6,8 +6,8 @@
  * found in the LICENSE file.
  */
 
-#ifndef SkSkTScopedPtr_DEFINED
-#define SkSkTScopedPtr_DEFINED
+#ifndef SkTScopedComPtr_DEFINED
+#define SkTScopedComPtr_DEFINED
 
 #include "SkTypes.h"
 #include "SkTemplates.h"
@@ -19,6 +19,18 @@ private:
     virtual ULONG STDMETHODCALLTYPE Release(void) = 0;
 };
 
+template<typename T> T* SkRefComPtr(T* ptr) {
+    ptr->AddRef();
+    return ptr;
+}
+
+template<typename T> T* SkSafeRefComPtr(T* ptr) {
+    if (ptr) {
+        ptr->AddRef();
+    }
+    return ptr;
+}
+
 template<typename T>
 class SkTScopedComPtr : SkNoncopyable {
 private:
@@ -29,7 +41,7 @@ public:
     ~SkTScopedComPtr() {
         this->reset();
     }
-    T &operator*() const { return *fPtr; }
+    T &operator*() const { SkASSERT(fPtr != NULL); return *fPtr; }
     SkBlockComRef<T> *operator->() const {
         return static_cast<SkBlockComRef<T>*>(fPtr);
     }
@@ -47,13 +59,13 @@ public:
             this->fPtr = NULL;
         }
     }
-    
+
     void swap(SkTScopedComPtr<T>& that) {
         T* temp = this->fPtr;
         this->fPtr = that.fPtr;
         that.fPtr = temp;
     }
-    
+
     T* release() {
         T* temp = this->fPtr;
         this->fPtr = NULL;

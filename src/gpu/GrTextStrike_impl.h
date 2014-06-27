@@ -13,45 +13,49 @@
 
 class GrFontCache::Key {
 public:
-    Key(GrFontScaler* scaler) {
-        fFontScalerKey = scaler->getKey();
+    explicit Key(const GrKey* fontScalarKey) {
+        fFontScalerKey = fontScalarKey;
     }
-    
-    uint32_t getHash() const { return fFontScalerKey->getHash(); }
-    
-    static bool LT(const GrTextStrike& strike, const Key& key) {
+
+    intptr_t getHash() const { return fFontScalerKey->getHash(); }
+
+    static bool LessThan(const GrTextStrike& strike, const Key& key) {
         return *strike.getFontScalerKey() < *key.fFontScalerKey;
     }
-    static bool EQ(const GrTextStrike& strike, const Key& key) {
+    static bool Equals(const GrTextStrike& strike, const Key& key) {
         return *strike.getFontScalerKey() == *key.fFontScalerKey;
     }
-    
+
 private:
     const GrKey* fFontScalerKey;
 };
 
 void GrFontCache::detachStrikeFromList(GrTextStrike* strike) {
     if (strike->fPrev) {
-        GrAssert(fHead != strike);
+        SkASSERT(fHead != strike);
         strike->fPrev->fNext = strike->fNext;
     } else {
-        GrAssert(fHead == strike);
+        SkASSERT(fHead == strike);
         fHead = strike->fNext;
     }
 
     if (strike->fNext) {
-        GrAssert(fTail != strike);
+        SkASSERT(fTail != strike);
         strike->fNext->fPrev = strike->fPrev;
     } else {
-        GrAssert(fTail == strike);
+        SkASSERT(fTail == strike);
         fTail = strike->fPrev;
     }
 }
 
+#if SK_DISTANCEFIELD_FONTS
+GrTextStrike* GrFontCache::getStrike(GrFontScaler* scaler, bool useDistanceField) {
+#else
 GrTextStrike* GrFontCache::getStrike(GrFontScaler* scaler) {
+#endif
     this->validate();
-    
-    Key key(scaler);
+
+    const Key key(scaler->getKey());
     GrTextStrike* strike = fCache.find(key);
     if (NULL == strike) {
         strike = this->generateStrike(scaler, key);
@@ -65,7 +69,9 @@ GrTextStrike* GrFontCache::getStrike(GrFontScaler* scaler) {
         strike->fPrev = NULL;
         fHead = strike;
     }
-
+#if SK_DISTANCEFIELD_FONTS
+    strike->fUseDistanceField = useDistanceField;
+#endif
     this->validate();
     return strike;
 }
@@ -79,16 +85,16 @@ GrTextStrike* GrFontCache::getStrike(GrFontScaler* scaler) {
 class GrTextStrike::Key {
 public:
     Key(GrGlyph::PackedID id) : fPackedID(id) {}
-    
+
     uint32_t getHash() const { return fPackedID; }
-    
-    static bool LT(const GrGlyph& glyph, const Key& key) {
+
+    static bool LessThan(const GrGlyph& glyph, const Key& key) {
         return glyph.fPackedID < key.fPackedID;
     }
-    static bool EQ(const GrGlyph& glyph, const Key& key) {
+    static bool Equals(const GrGlyph& glyph, const Key& key) {
         return glyph.fPackedID == key.fPackedID;
     }
-    
+
 private:
     GrGlyph::PackedID fPackedID;
 };
@@ -103,4 +109,3 @@ GrGlyph* GrTextStrike::getGlyph(GrGlyph::PackedID packed,
 }
 
 #endif
-

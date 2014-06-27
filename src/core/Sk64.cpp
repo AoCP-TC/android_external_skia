@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2006 The Android Open Source Project
  *
@@ -6,9 +5,8 @@
  * found in the LICENSE file.
  */
 
-
 #include "Sk64.h"
-#include "SkMath.h"
+#include "SkMathPriv.h"
 
 #define shift_left(hi, lo)          \
     hi = (hi << 1) | (lo >> 31);    \
@@ -135,15 +133,6 @@ void Sk64::abs()
     }
 }
 
-////////////////////////////////////////////////////////////////
-
-static inline int32_t round_right_16(int32_t hi, uint32_t lo)
-{
-    uint32_t sum = lo + (1 << 15);
-    hi += (sum < lo);
-    return (hi << 16) | (sum >> 16);
-}
-
 SkBool Sk64::isFixed() const
 {
     Sk64 tmp = *this;
@@ -255,17 +244,11 @@ void Sk64::div(int32_t denom, DivOptions option)
 
     do {
         shift_left(rhi, rlo);
-#ifdef SK_CPU_HAS_CONDITIONAL_INSTR
         if ((uint32_t)denom <= (uint32_t)hi)
         {
             hi -= denom;
             rlo |= 1;
         }
-#else
-        int32_t diff = (denom - hi - 1) >> 31;
-        hi -= denom & diff;
-        rlo -= diff;
-#endif
         shift_left(hi, lo);
     } while (--bits >= 0);
     SkASSERT(rhi >= 0);
@@ -360,4 +343,3 @@ SkFixed Sk64::getFixedDiv(const Sk64& denom) const
     }
     return SkApplySign(result, sign);
 }
-

@@ -11,6 +11,8 @@
 #ifndef GrConfig_DEFINED
 #define GrConfig_DEFINED
 
+#include "SkTypes.h"
+
 ///////////////////////////////////////////////////////////////////////////////
 // preconfig section:
 //
@@ -30,82 +32,14 @@
  *  Gr defines are set to 0 or 1, rather than being undefined or defined
  */
 
-#if !defined(GR_ANDROID_BUILD)
-    #define GR_ANDROID_BUILD    0
-#endif
-#if !defined(GR_IOS_BUILD)
-    #define GR_IOS_BUILD        0
-#endif
-#if !defined(GR_LINUX_BUILD)
-    #define GR_LINUX_BUILD      0
-#endif
-#if !defined(GR_MAC_BUILD)
-    #define GR_MAC_BUILD        0
-#endif
-#if !defined(GR_WIN32_BUILD)
-    #define GR_WIN32_BUILD      0
-#endif
-#if !defined(GR_QNX_BUILD)
-    #define GR_QNX_BUILD        0
-#endif
-
-/**
- *  If no build target has been defined, attempt to infer.
- */
-#if !GR_ANDROID_BUILD && !GR_IOS_BUILD && !GR_LINUX_BUILD && !GR_MAC_BUILD && !GR_WIN32_BUILD && !GR_QNX_BUILD
-    #if defined(_WIN32)
-        #undef GR_WIN32_BUILD
-        #define GR_WIN32_BUILD      1
-//      #error "WIN"
-    #elif TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
-        #undef GR_IOS_BUILD
-        #define GR_IOS_BUILD        1
-//      #error "IOS"
-    #elif defined(SK_BUILD_FOR_ANDROID)
-        #undef GR_ANDROID_BUILD
-        #define GR_ANDROID_BUILD    1
-//      #error "ANDROID"
-    #elif TARGET_OS_MAC
-        #undef GR_MAC_BUILD
-        #define GR_MAC_BUILD        1
-//      #error "MAC"
-    #elif TARGET_OS_QNX || defined(__QNXNTO__)
-        #undef GR_QNX_BUILD
-        #define GR_QNX_BUILD        1
-//      #error "QNX"
-    #else
-        #undef GR_LINUX_BUILD
-        #define GR_LINUX_BUILD      1
-//      #error "LINUX"
-    #endif
-#endif
-
-// we need both GR_DEBUG and GR_RELEASE to be defined as 0 or 1
-//
-#ifndef GR_DEBUG
-    #ifdef GR_RELEASE
-        #define GR_DEBUG !GR_RELEASE
-    #else
-        #ifdef NDEBUG
-            #define GR_DEBUG    0
-        #else
-            #define GR_DEBUG    1
-        #endif
-    #endif
-#endif
-
-#ifndef GR_RELEASE
-    #define GR_RELEASE  !GR_DEBUG
-#endif
-
-#if GR_DEBUG == GR_RELEASE
-    #error "GR_DEBUG and GR_RELEASE must not be the same"
+#if !defined(GR_CACHE_STATS)
+    #define GR_CACHE_STATS      0
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 
-#if GR_WIN32_BUILD
+#if defined(SK_BUILD_FOR_WIN32)
 // VC8 doesn't support stdint.h, so we define those types here.
 typedef signed char int8_t;
 typedef unsigned char uint8_t;
@@ -118,11 +52,15 @@ typedef unsigned __int64 uint64_t;
 #else
 /*
  *  Include stdint.h with defines that trigger declaration of C99 limit/const
- *  macros here before anyone else has a chance to include stdint.h without 
+ *  macros here before anyone else has a chance to include stdint.h without
  *  these.
  */
+#ifndef __STDC_LIMIT_MACROS
 #define __STDC_LIMIT_MACROS
+#endif
+#ifndef __STDC_CONSTANT_MACROS
 #define __STDC_CONSTANT_MACROS
+#endif
 #include <stdint.h>
 #endif
 
@@ -133,8 +71,8 @@ typedef unsigned __int64 uint64_t;
  *  A alternate user config file can be specified by defining
  *  GR_USER_CONFIG_FILE. It should be defined relative to GrConfig.h
  *
- *  e.g. it can specify GR_DEBUG/GR_RELEASE as it please, change the BUILD
- *  target, or supply its own defines for anything else (e.g. GR_SCALAR)
+ *  e.g. it can change the BUILD target or supply its own defines for anything
+ *  else (e.g. GR_DEFAULT_RESOURCE_CACHE_MB_LIMIT)
  */
 #if !defined(GR_USER_CONFIG_FILE)
     #include "GrUserConfig.h"
@@ -148,41 +86,11 @@ typedef unsigned __int64 uint64_t;
 // postconfig section:
 //
 
-// GR_IMPLEMENTATION should be define to 1 when building Gr and 0 when including
-// it in another dependent build. The Gr makefile/ide-project should define this
-// to 1.
-#if !defined(GR_IMPLEMENTATION)
-    #define GR_IMPLEMENTATION 0
-#endif
-
-// If Gr is built as a shared library then GR_DLL should be defined to 1 (both
-// when building Gr and when including its headers in dependent builds). Only
-// currently supported minimally for Chrome's Win32 Multi-DLL build (TODO:
-// correctly exort all of the public API correctly and support shared lib on
-// other platforms).
-#if !defined(GR_DLL)
-    #define GR_DLL 0
-#endif
-
-#if GR_DLL
-    #if GR_WIN32_BUILD
-        #if GR_IMPLEMENTATION
-            #define GR_API __declspec(dllexport)
-        #else
-            #define GR_API __declspec(dllimport)
-        #endif
-    #else
-        #define GR_API __attribute__((visibility("default")))
-    #endif
-#else
-    #define GR_API
-#endif
-
 // By now we must have a GR_..._BUILD symbol set to 1, and a decision about
 // debug -vs- release
 //
 
-extern GR_API void GrPrintf(const char format[], ...);
+#define GrPrintf SkDebugf
 
 /**
  *  GR_STRING makes a string of X where X is expanded before conversion to a string
@@ -219,7 +127,7 @@ extern GR_API void GrPrintf(const char format[], ...);
  *  GR_ALWAYSBREAK is an unconditional break in all builds.
  */
 #if !defined(GR_ALWAYSBREAK)
-    #if     GR_WIN32_BUILD
+    #if     defined(SK_BUILD_FOR_WIN32)
         #define GR_ALWAYSBREAK SkNO_RETURN_HINT(); __debugbreak()
     #else
         // TODO: do other platforms really not have continuable breakpoints?
@@ -233,7 +141,7 @@ extern GR_API void GrPrintf(const char format[], ...);
  *  GR_DEBUGBREAK is an unconditional break in debug builds.
  */
 #if !defined(GR_DEBUGBREAK)
-    #if GR_DEBUG
+    #ifdef SK_DEBUG
         #define GR_DEBUGBREAK GR_ALWAYSBREAK
     #else
         #define GR_DEBUGBREAK
@@ -257,7 +165,7 @@ extern GR_API void GrPrintf(const char format[], ...);
  *  GR_DEBUGASSERT is an assertion in debug builds only.
  */
 #if !defined(GR_DEBUGASSERT)
-    #if GR_DEBUG
+    #ifdef SK_DEBUG
         #define GR_DEBUGASSERT(COND) GR_ALWAYSASSERT(COND)
     #else
         #define GR_DEBUGASSERT(COND)
@@ -267,25 +175,16 @@ extern GR_API void GrPrintf(const char format[], ...);
 /**
  *  Prettier forms of the above macros.
  */
-#define GrAssert(COND) GR_DEBUGASSERT(COND)
 #define GrAlwaysAssert(COND) GR_ALWAYSASSERT(COND)
 
 /**
- * Crash from unrecoverable condition, optionally with a message.
+ * Crash from unrecoverable condition, optionally with a message. The debug variants only
+ * crash in a debug build. The message versions print the message regardless of release vs debug.
  */
 inline void GrCrash() { GrAlwaysAssert(false); }
 inline void GrCrash(const char* msg) { GrPrintf(msg); GrAlwaysAssert(false); }
-
-/**
- *  GR_DEBUGCODE compiles the code X in debug builds only
- */
-#if !defined(GR_DEBUGCODE)
-    #if GR_DEBUG
-        #define GR_DEBUGCODE(X) X
-    #else
-        #define GR_DEBUGCODE(X)
-    #endif
-#endif
+inline void GrDebugCrash() { SkASSERT(false); }
+inline void GrDebugCrash(const char* msg) { GrPrintf(msg); SkASSERT(false); }
 
 /**
  *  GR_STATIC_ASSERT is a compile time assertion. Depending on the platform
@@ -306,54 +205,6 @@ inline void GrCrash(const char* msg) { GrPrintf(msg); GrAlwaysAssert(false); }
     #endif
 #endif
 
-#if !defined(GR_SCALAR_IS_FLOAT)
-    #define GR_SCALAR_IS_FLOAT   0
-#endif
-#if !defined(GR_SCALAR_IS_FIXED)
-    #define GR_SCALAR_IS_FIXED   0
-#endif
-
-#if !defined(GR_TEXT_SCALAR_TYPE_IS_USHORT)
-    #define GR_TEXT_SCALAR_TYPE_IS_USHORT  0
-#endif
-#if !defined(GR_TEXT_SCALAR_TYPE_IS_FLOAT)
-    #define GR_TEXT_SCALAR_TYPE_IS_FLOAT   0
-#endif
-#if !defined(GR_TEXT_SCALAR_TYPE_IS_FIXED)
-    #define GR_TEXT_SCALAR_TYPE_IS_FIXED   0
-#endif
-
-#ifndef GR_DUMP_TEXTURE_UPLOAD
-    #define GR_DUMP_TEXTURE_UPLOAD  0
-#endif
-
-/**
- *  GR_COLLECT_STATS controls whether the GrGpu class collects stats.
- *  If not already defined then collect in debug build but not release.
- */
-#if !defined(GR_COLLECT_STATS)
-    #define GR_COLLECT_STATS GR_DEBUG
-#endif
-
-/**
- *  GR_STATIC_RECT_VB controls whether rects are drawn by issuing a vertex
- *  for each corner or using a static vb that is positioned by modifying the
- *  view / texture matrix.
- */
-#if !defined(GR_STATIC_RECT_VB)
-    #define GR_STATIC_RECT_VB 0
-#endif
-
-/**
- *  GR_AGGRESSIVE_SHADER_OPTS controls how aggressively shaders are optimized
- *  for special cases. On systems where program changes are expensive this
- *  may not be advantageous. Consecutive draws may no longer use the same
- *  program.
- */
-#if !defined(GR_AGGRESSIVE_SHADER_OPTS)
-    #define GR_AGGRESSIVE_SHADER_OPTS 1
-#endif
-
 /**
  * GR_GEOM_BUFFER_LOCK_THRESHOLD gives a threshold (in bytes) for when Gr should
  * lock a GrGeometryBuffer to update its contents. It will use lock() if the
@@ -364,59 +215,30 @@ inline void GrCrash(const char* msg) { GrPrintf(msg); GrAlwaysAssert(false); }
     #define GR_GEOM_BUFFER_LOCK_THRESHOLD (1 << 15)
 #endif
 
-///////////////////////////////////////////////////////////////////////////////
-// tail section:
-//
-// Now we just assert if we are missing some required define, or if we detect
-// and inconsistent combination of defines
-//
-
+/**
+ * GR_DEFAULT_RESOURCE_CACHE_MB_LIMIT gives a threshold (in megabytes) for the
+ * maximum size of the texture cache in vram. The value is only a default and
+ * can be overridden at runtime.
+ */
+#if !defined(GR_DEFAULT_RESOURCE_CACHE_MB_LIMIT)
+    #define GR_DEFAULT_RESOURCE_CACHE_MB_LIMIT 96
+#endif
 
 /**
- *  Only one build target macro should be 1 and the rest should be 0.
+ * GR_DEFAULT_RESOURCE_CACHE_COUNT_LIMIT specifies the maximum number of
+ * textures the texture cache can hold in vram. The value is only a default and
+ * can be overridden at runtime.
  */
-#define GR_BUILD_SUM    (GR_WIN32_BUILD + GR_MAC_BUILD + GR_IOS_BUILD + GR_ANDROID_BUILD + GR_LINUX_BUILD + GR_QNX_BUILD)
-#if 0 == GR_BUILD_SUM
-    #error "Missing a GR_BUILD define"
-#elif 1 != GR_BUILD_SUM
-    #error "More than one GR_BUILD defined"
+#if !defined(GR_DEFAULT_RESOURCE_CACHE_COUNT_LIMIT)
+    #define GR_DEFAULT_RESOURCE_CACHE_COUNT_LIMIT 2048
 #endif
 
-
-#if !GR_SCALAR_IS_FLOAT && !GR_SCALAR_IS_FIXED
-    #undef  GR_SCALAR_IS_FLOAT
-    #define GR_SCALAR_IS_FLOAT              1
-    #pragma message GR_WARN("Scalar type not defined, defaulting to float")
-#endif
-
-#if !GR_TEXT_SCALAR_IS_FLOAT && \
-    !GR_TEXT_SCALAR_IS_FIXED && \
-    !GR_TEXT_SCALAR_IS_USHORT
-    #undef  GR_TEXT_SCALAR_IS_FLOAT
-    #define GR_TEXT_SCALAR_IS_FLOAT         1
-    #pragma message GR_WARN("Text scalar type not defined, defaulting to float")
-#endif
-
-#if 0
-#if GR_WIN32_BUILD
-//    #pragma message GR_WARN("GR_WIN32_BUILD")
-#endif
-#if GR_MAC_BUILD
-//    #pragma message GR_WARN("GR_MAC_BUILD")
-#endif
-#if GR_IOS_BUILD
-//    #pragma message GR_WARN("GR_IOS_BUILD")
-#endif
-#if GR_ANDROID_BUILD
-//    #pragma message GR_WARN("GR_ANDROID_BUILD")
-#endif
-#if GR_LINUX_BUILD
-//    #pragma message GR_WARN("GR_LINUX_BUILD")
-#endif
-#if GR_QNX_BUILD
-//    #pragma message GR_WARN("GR_QNX_BUILD")
-#endif
+/**
+ * GR_STROKE_PATH_RENDERING controls whether or not the GrStrokePathRenderer can be selected
+ * as a path renderer. GrStrokePathRenderer is currently an experimental path renderer.
+ */
+#if !defined(GR_STROKE_PATH_RENDERING)
+    #define GR_STROKE_PATH_RENDERING                 0
 #endif
 
 #endif
-

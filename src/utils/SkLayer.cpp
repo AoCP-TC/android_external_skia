@@ -228,4 +228,3 @@ void SkLayer::draw(SkCanvas* canvas, SkScalar opacity) {
         }
     }
 }
-

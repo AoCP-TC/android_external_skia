@@ -48,7 +48,7 @@ bool SkBoundaryPatch::evalPatch(SkPoint verts[], int rows, int cols) {
 
     const SkScalar invR = SkScalarInvert(SkIntToScalar(rows - 1));
     const SkScalar invC = SkScalarInvert(SkIntToScalar(cols - 1));
-    
+
     for (int y = 0; y < cols; y++) {
         SkScalar yy = y * invC;
         for (int x = 0; x < rows; x++) {
@@ -77,4 +77,3 @@ SkPoint SkCubicBoundary::eval(Edge e, SkScalar t) {
     SkEvalCubicAt(&fPts[e * 3], t, &loc, NULL, NULL);
     return loc;
 }
-

@@ -7,11 +7,14 @@
  */
 #include "SkNWayCanvas.h"
 
-SkNWayCanvas::SkNWayCanvas(int width, int height) {
+static SkBitmap make_noconfig_bm(int width, int height) {
     SkBitmap bm;
     bm.setConfig(SkBitmap::kNo_Config, width, height);
-    this->setBitmapDevice(bm);
+    return bm;
 }
+
+SkNWayCanvas::SkNWayCanvas(int width, int height)
+        : INHERITED(make_noconfig_bm(width, height)) {}
 
 SkNWayCanvas::~SkNWayCanvas() {
     this->removeAll();
@@ -141,6 +144,14 @@ bool SkNWayCanvas::clipRect(const SkRect& rect, SkRegion::Op op, bool doAA) {
     return this->INHERITED::clipRect(rect, op, doAA);
 }
 
+bool SkNWayCanvas::clipRRect(const SkRRect& rrect, SkRegion::Op op, bool doAA) {
+    Iter iter(fList);
+    while (iter.next()) {
+        iter->clipRRect(rrect, op, doAA);
+    }
+    return this->INHERITED::clipRRect(rrect, op, doAA);
+}
+
 bool SkNWayCanvas::clipPath(const SkPath& path, SkRegion::Op op, bool doAA) {
     Iter iter(fList);
     while (iter.next()) {
@@ -155,6 +166,13 @@ bool SkNWayCanvas::clipRegion(const SkRegion& deviceRgn, SkRegion::Op op) {
         iter->clipRegion(deviceRgn, op);
     }
     return this->INHERITED::clipRegion(deviceRgn, op);
+}
+
+void SkNWayCanvas::clear(SkColor color) {
+    Iter iter(fList);
+    while (iter.next()) {
+        iter->clear(color);
+    }
 }
 
 void SkNWayCanvas::drawPaint(const SkPaint& paint) {
@@ -179,6 +197,20 @@ void SkNWayCanvas::drawRect(const SkRect& rect, const SkPaint& paint) {
     }
 }
 
+void SkNWayCanvas::drawOval(const SkRect& rect, const SkPaint& paint) {
+    Iter iter(fList);
+    while (iter.next()) {
+        iter->drawOval(rect, paint);
+    }
+}
+
+void SkNWayCanvas::drawRRect(const SkRRect& rrect, const SkPaint& paint) {
+    Iter iter(fList);
+    while (iter.next()) {
+        iter->drawRRect(rrect, paint);
+    }
+}
+
 void SkNWayCanvas::drawPath(const SkPath& path, const SkPaint& paint) {
     Iter iter(fList);
     while (iter.next()) {
@@ -194,11 +226,12 @@ void SkNWayCanvas::drawBitmap(const SkBitmap& bitmap, SkScalar x, SkScalar y,
     }
 }
 
-void SkNWayCanvas::drawBitmapRect(const SkBitmap& bitmap, const SkIRect* src,
-                                  const SkRect& dst, const SkPaint* paint) {
+void SkNWayCanvas::drawBitmapRectToRect(const SkBitmap& bitmap, const SkRect* src,
+                                  const SkRect& dst, const SkPaint* paint,
+                                  DrawBitmapRectFlags flags) {
     Iter iter(fList);
     while (iter.next()) {
-        iter->drawBitmapRect(bitmap, src, dst, paint);
+        iter->drawBitmapRectToRect(bitmap, src, dst, paint, flags);
     }
 }
 
@@ -207,6 +240,14 @@ void SkNWayCanvas::drawBitmapMatrix(const SkBitmap& bitmap, const SkMatrix& m,
     Iter iter(fList);
     while (iter.next()) {
         iter->drawBitmapMatrix(bitmap, m, paint);
+    }
+}
+
+void SkNWayCanvas::drawBitmapNine(const SkBitmap& bitmap, const SkIRect& center,
+                                  const SkRect& dst, const SkPaint* paint) {
+    Iter iter(fList);
+    while (iter.next()) {
+        iter->drawBitmapNine(bitmap, center, dst, paint);
     }
 }
 
@@ -271,6 +312,13 @@ void SkNWayCanvas::drawVertices(VertexMode vmode, int vertexCount,
     }
 }
 
+void SkNWayCanvas::drawData(const void* data, size_t length) {
+    Iter iter(fList);
+    while (iter.next()) {
+        iter->drawData(data, length);
+    }
+}
+
 SkBounder* SkNWayCanvas::setBounder(SkBounder* bounder) {
     Iter iter(fList);
     while (iter.next()) {
@@ -287,4 +335,23 @@ SkDrawFilter* SkNWayCanvas::setDrawFilter(SkDrawFilter* filter) {
     return this->INHERITED::setDrawFilter(filter);
 }
 
+void SkNWayCanvas::beginCommentGroup(const char* description) {
+    Iter iter(fList);
+    while (iter.next()) {
+        iter->beginCommentGroup(description);
+    }
+}
 
+void SkNWayCanvas::addComment(const char* kywd, const char* value) {
+    Iter iter(fList);
+    while (iter.next()) {
+        iter->addComment(kywd, value);
+    }
+}
+
+void SkNWayCanvas::endCommentGroup() {
+    Iter iter(fList);
+    while (iter.next()) {
+        iter->endCommentGroup();
+    }
+}

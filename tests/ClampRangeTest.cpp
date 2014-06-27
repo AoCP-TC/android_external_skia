@@ -1,12 +1,13 @@
-
 /*
  * Copyright 2011 Google Inc.
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
+
 #include "Test.h"
-#include "SkClampRange.h"
+#include "TestClassDef.h"
+#include "gradients/SkClampRange.h"
 #include "SkRandom.h"
 
 static skiatest::Reporter* gReporter;
@@ -65,7 +66,7 @@ static void slow_check(const SkClampRange& range,
         }
         if (range.fCount1 > 0 && fx != range.fFx1) {
             SkDebugf("%x %x\n", fx, range.fFx1);
-            R_ASSERT(!"bad fFx1");
+            R_ASSERT(false); // bad fFx1
             return;
         }
         for (i = 0; i < range.fCount1; i++) {
@@ -80,6 +81,7 @@ static void slow_check(const SkClampRange& range,
     }
 }
 
+
 static void test_range(SkFixed fx, SkFixed dx, int count) {
     SkClampRange range;
     range.init(fx, dx, count, V0, V1);
@@ -88,15 +90,14 @@ static void test_range(SkFixed fx, SkFixed dx, int count) {
 
 #define ff(x)   SkIntToFixed(x)
 
-void TestClampRange(skiatest::Reporter* reporter);
-void TestClampRange(skiatest::Reporter* reporter) {
+DEF_TEST(ClampRange, reporter) {
     gReporter = reporter;
 
     test_range(0, 0, 20);
     test_range(0xFFFF, 0, 20);
     test_range(-ff(2), 0, 20);
     test_range( ff(2), 0, 20);
-    
+
     test_range(-10, 1, 20);
     test_range(10, -1, 20);
     test_range(-10, 3, 20);
@@ -108,7 +109,7 @@ void TestClampRange(skiatest::Reporter* reporter) {
     test_range(ff(1)/2, ff(-16384), 100);
 
     SkRandom rand;
-    
+
     // test non-overflow cases
     for (int i = 0; i < 1000000; i++) {
         SkFixed fx = rand.nextS() >> 1;
@@ -117,7 +118,7 @@ void TestClampRange(skiatest::Reporter* reporter) {
         SkFixed dx = (sx - fx) / count;
         test_range(fx, dx, count);
     }
-    
+
     // test overflow cases
     for (int i = 0; i < 100000; i++) {
         SkFixed fx = rand.nextS();
@@ -126,10 +127,3 @@ void TestClampRange(skiatest::Reporter* reporter) {
         test_range(fx, dx, count);
     }
 }
-
-#ifdef USE_REPORTER
-
-#include "TestClassDef.h"
-DEFINE_TESTCLASS("ClampRange", ClampRangeClass, TestClampRange)
-
-#endif

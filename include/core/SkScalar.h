@@ -29,8 +29,6 @@
         as a 16.16 fixed point integer.
     */
     typedef float   SkScalar;
-    extern const uint32_t gIEEENotANumber;
-    extern const uint32_t gIEEEInfinity;
 
     /** SK_Scalar1 is defined to be 1.0 represented as an SkScalar
     */
@@ -40,7 +38,10 @@
     #define SK_ScalarHalf           (0.5f)
     /** SK_ScalarInfinity is defined to be infinity as an SkScalar
     */
-    #define SK_ScalarInfinity           (*(const float*)&gIEEEInfinity)
+    #define SK_ScalarInfinity       SK_FloatInfinity
+    /** SK_ScalarNegativeInfinity is defined to be negative infinity as an SkScalar
+    */
+    #define SK_ScalarNegativeInfinity       SK_FloatNegativeInfinity
     /** SK_ScalarMax is defined to be the largest value representable as an SkScalar
     */
     #define SK_ScalarMax            (3.402823466e+38f)
@@ -49,57 +50,26 @@
     #define SK_ScalarMin            (-SK_ScalarMax)
     /** SK_ScalarNaN is defined to be 'Not a Number' as an SkScalar
     */
-    #define SK_ScalarNaN      (*(const float*)(const void*)&gIEEENotANumber)
+    #define SK_ScalarNaN            SK_FloatNaN
     /** SkScalarIsNaN(n) returns true if argument is not a number
     */
     static inline bool SkScalarIsNaN(float x) { return x != x; }
+
     /** Returns true if x is not NaN and not infinite */
     static inline bool SkScalarIsFinite(float x) {
-        uint32_t bits = SkFloat2Bits(x);    // need unsigned for our shifts
-        int exponent = bits << 1 >> 24;
-        return exponent != 0xFF;
+        // We rely on the following behavior of infinities and nans
+        // 0 * finite --> 0
+        // 0 * infinity --> NaN
+        // 0 * NaN --> NaN
+        float prod = x * 0;
+        // At this point, prod will either be NaN or 0
+        // Therefore we can return (prod == prod) or (0 == prod).
+        return prod == prod;
     }
-#ifdef SK_DEBUG
-    /** SkIntToScalar(n) returns its integer argument as an SkScalar
-     *
-     * If we're compiling in DEBUG mode, and can thus afford some extra runtime
-     * cycles, check to make sure that the parameter passed in has not already
-     * been converted to SkScalar.  (A double conversion like this is harmless
-     * for SK_SCALAR_IS_FLOAT, but for SK_SCALAR_IS_FIXED this causes trouble.)
-     *
-     * Note that we need all of these method signatures to properly handle the
-     * various types that we pass into SkIntToScalar() to date:
-     * int, size_t, U8CPU, etc., even though what we really mean is "anything
-     * but a float".
-     */
-    static inline float SkIntToScalar(signed int param) {
-        return (float)param;
-    }
-    static inline float SkIntToScalar(unsigned int param) {
-        return (float)param;
-    }
-    static inline float SkIntToScalar(signed long param) {
-        return (float)param;
-    }
-    static inline float SkIntToScalar(unsigned long param) {
-        return (float)param;
-    }
-    static inline float SkIntToScalar(float param) {
-        /* If the parameter passed into SkIntToScalar is a float,
-         * one of two things has happened:
-         * 1. the parameter was an SkScalar (which is typedef'd to float)
-         * 2. the parameter was a float instead of an int
-         *
-         * Either way, it's not good.
-         */
-        SkDEBUGFAIL("looks like you passed an SkScalar into SkIntToScalar");
-        return (float)0;
-    }
-#else  // not SK_DEBUG
+
     /** SkIntToScalar(n) returns its integer argument as an SkScalar
     */
     #define SkIntToScalar(n)        ((float)(n))
-#endif // not SK_DEBUG
     /** SkFixedToScalar(n) returns its SkFixed argument as an SkScalar
     */
     #define SkFixedToScalar(x)      SkFixedToFloat(x)
@@ -108,7 +78,9 @@
     #define SkScalarToFixed(x)      SkFloatToFixed(x)
 
     #define SkScalarToFloat(n)      (n)
+#ifndef SK_SCALAR_TO_FLOAT_EXCLUDED
     #define SkFloatToScalar(n)      (n)
+#endif
 
     #define SkScalarToDouble(n)      (double)(n)
     #define SkDoubleToScalar(n)      (float)(n)
@@ -124,6 +96,7 @@
     #define SkScalarFloorToInt(x)       sk_float_floor2int(x)
     #define SkScalarCeilToInt(x)        sk_float_ceil2int(x)
     #define SkScalarRoundToInt(x)       sk_float_round2int(x)
+    #define SkScalarTruncToInt(x)       static_cast<int>(x)
 
     /** Returns the absolute value of the specified SkScalar
     */
@@ -175,6 +148,9 @@
     /** Returns the square root of the SkScalar
     */
     #define SkScalarSqrt(x)         sk_float_sqrt(x)
+    /** Returns b to the e
+    */
+    #define SkScalarPow(b, e)       sk_float_pow(b, e)
     /** Returns the average of two SkScalars (a+b)/2
     */
     #define SkScalarAve(a, b)       (((a) + (b)) * 0.5f)
@@ -212,7 +188,8 @@
 
     #define SK_Scalar1              SK_Fixed1
     #define SK_ScalarHalf           SK_FixedHalf
-    #define SK_ScalarInfinity   SK_FixedMax
+    #define SK_ScalarInfinity           SK_FixedMax
+    #define SK_ScalarNegativeInfinity   SK_FixedMin
     #define SK_ScalarMax            SK_FixedMax
     #define SK_ScalarMin            SK_FixedMin
     #define SK_ScalarNaN            SK_FixedNaN
@@ -222,13 +199,13 @@
     #define SkIntToScalar(n)        SkIntToFixed(n)
     #define SkFixedToScalar(x)      (x)
     #define SkScalarToFixed(x)      (x)
-    #ifdef SK_CAN_USE_FLOAT
-        #define SkScalarToFloat(n)  SkFixedToFloat(n)
-        #define SkFloatToScalar(n)  SkFloatToFixed(n)
+    #define SkScalarToFloat(n)  SkFixedToFloat(n)
+#ifndef SK_SCALAR_TO_FLOAT_EXCLUDED
+    #define SkFloatToScalar(n)  SkFloatToFixed(n)
+#endif
 
-        #define SkScalarToDouble(n) SkFixedToDouble(n)
-        #define SkDoubleToScalar(n) SkDoubleToFixed(n)
-    #endif
+    #define SkScalarToDouble(n) SkFixedToDouble(n)
+    #define SkDoubleToScalar(n) SkDoubleToFixed(n)
     #define SkScalarFraction(x)     SkFixedFraction(x)
 
     #define SkScalarFloorToScalar(x)    SkFixedFloorToFixed(x)
@@ -238,6 +215,7 @@
     #define SkScalarFloorToInt(x)       SkFixedFloorToInt(x)
     #define SkScalarCeilToInt(x)        SkFixedCeilToInt(x)
     #define SkScalarRoundToInt(x)       SkFixedRoundToInt(x)
+    #define SkScalarTruncToInt(x)       (((x) < 0) ? SkScalarCeilToInt(x) : SkScalarFloorToInt(x))
 
     #define SkScalarAbs(x)          SkFixedAbs(x)
     #define SkScalarCopySign(x, y)  SkCopySign32(x, y)
@@ -305,19 +283,16 @@ static inline SkScalar SkScalarSignAsScalar(SkScalar x) {
 
 #define SK_ScalarNearlyZero         (SK_Scalar1 / (1 << 12))
 
-/*  <= is slower than < for floats, so we use < for our tolerance test
-*/
-
 static inline bool SkScalarNearlyZero(SkScalar x,
                                     SkScalar tolerance = SK_ScalarNearlyZero) {
-    SkASSERT(tolerance > 0);
-    return SkScalarAbs(x) < tolerance;
+    SkASSERT(tolerance >= 0);
+    return SkScalarAbs(x) <= tolerance;
 }
 
 static inline bool SkScalarNearlyEqual(SkScalar x, SkScalar y,
                                      SkScalar tolerance = SK_ScalarNearlyZero) {
-    SkASSERT(tolerance > 0);
-    return SkScalarAbs(x-y) < tolerance;
+    SkASSERT(tolerance >= 0);
+    return SkScalarAbs(x-y) <= tolerance;
 }
 
 /** Linearly interpolate between A and B, based on t.
@@ -329,6 +304,12 @@ static inline bool SkScalarNearlyEqual(SkScalar x, SkScalar y,
 static inline SkScalar SkScalarInterp(SkScalar A, SkScalar B, SkScalar t) {
     SkASSERT(t >= 0 && t <= SK_Scalar1);
     return A + SkScalarMul(B - A, t);
+}
+
+static inline SkScalar SkScalarLog2(SkScalar x) {
+    static const SkScalar log2_conversion_factor = SkScalarDiv(1, SkScalarLog(2));
+
+    return SkScalarMul(SkScalarLog(x), log2_conversion_factor);
 }
 
 /** Interpolate along the function described by (keys[length], values[length])
@@ -343,5 +324,22 @@ static inline SkScalar SkScalarInterp(SkScalar A, SkScalar B, SkScalar t) {
 */
 SkScalar SkScalarInterpFunc(SkScalar searchKey, const SkScalar keys[],
                             const SkScalar values[], int length);
+
+/*
+ *  Helper to compare an array of scalars.
+ */
+static inline bool SkScalarsEqual(const SkScalar a[], const SkScalar b[], int n) {
+#ifdef SK_SCALAR_IS_FLOAT
+    SkASSERT(n >= 0);
+    for (int i = 0; i < n; ++i) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+#else
+    return 0 == memcmp(a, b, n * sizeof(SkScalar));
+#endif
+}
 
 #endif
